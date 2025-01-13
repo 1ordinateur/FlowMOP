@@ -6,33 +6,84 @@ Main integration module that coordinates the gating operations.
 import numpy as np
 import pandas as pd
 import warnings
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Literal
 
 from .time_gating import TimeGateStrategy, MADTimeGate
 from .debris_gating import DebrisGateStrategy, FSCDebrisGate
-from .doublet_gating import DoubletGateStrategy, MADDoubletGate
+from .doublet_gating import DoubletGateStrategy, MADDoubletGate, InflectionDoubletGate
 
 class FlowMOP:
     """Main class for the Flow Cytometry Multi-Operation Pipeline."""
     
     def __init__(self,
-                 time_gate: Optional[TimeGateStrategy] = None,
-                 debris_gate: Optional[DebrisGateStrategy] = None,
-                 doublet_gate: Optional[DoubletGateStrategy] = None,
-                 time_channel_index: Optional[int] = None):
+                 remove_zeros=True,
+                 min_cells=150,
+                 max_bins=500,
+                 step=200,
+                 MAD=6,
+                 IT_limit=0.6,
+                 peak_detection_smoothing=2,
+                 spectral=False,
+                 mad=5,
+                 min_peaks=2,
+                 max_peaks=3,
+                 smoothing_window=3,
+                 percentage_cells_present=3,
+                 time_channel_index=None,
+                 doublet_method: Literal['mad', 'inflection'] = 'mad',
+                 doublet_config: Optional[dict] = None):
         """
-        Initialize FlowMOP with gating strategies.
+        Initialize FlowMOP with configuration parameters.
         
         Args:
-            time_gate: Strategy for time gating
-            debris_gate: Strategy for debris removal
-            doublet_gate: Strategy for doublet discrimination
-            time_channel_index: Index of the time channel
+            remove_zeros: Remove zero-value events
+            min_cells: Minimum number of cells required for gating
+            max_bins: Maximum number of bins for histogram-based gating
+            step: Step size for peak detection
+            MAD: Median Absolute Deviation threshold for MAD-based gating
+            IT_limit: Limit for IT-based gating
+            peak_detection_smoothing: Smoothing factor for peak detection
+            spectral: Whether to use spectral gating
+            mad: MAD threshold for MAD-based doublet gating
+            min_peaks: Minimum number of peaks for peak detection
+            max_peaks: Maximum number of peaks for peak detection
+            smoothing_window: Smoothing window for peak detection
+            percentage_cells_present: Percentage of cells required for gating
+            time_channel_index: Index of time channel
+            doublet_method: Method for doublet gating ('mad' or 'inflection')
+            doublet_config: Configuration for doublet gating method
+                For inflection method:
+                    - bins: Number of bins or method ('auto', 'fd', 'scott')
+                    - smoothing_factor: KDE smoothing factor (0.1 to 1.0)
+                    - fallback_mad_threshold: Fallback MAD threshold
         """
-        self.time_gate = time_gate or MADTimeGate()
-        self.debris_gate = debris_gate or FSCDebrisGate()
-        self.doublet_gate = doublet_gate or MADDoubletGate()
+        self.time_gate = MADTimeGate(
+            remove_zeros=remove_zeros,
+            min_cells=min_cells,
+            max_bins=max_bins,
+            step=step,
+            mad_threshold=MAD,
+            peak_removal=1/3,
+            min_nr_bins_peakdetection=5
+        )
+        self.debris_gate = FSCDebrisGate()
+        
+        # Configure doublet gating based on method
+        if doublet_method == 'inflection':
+            config = doublet_config or {}
+            self.doublet_gate = InflectionDoubletGate(
+                bins=config.get('bins', 'auto'),
+                smoothing_factor=config.get('smoothing_factor', 0.5),
+                fallback_mad_threshold=config.get('fallback_mad_threshold', 5)
+            )
+        else:  # 'mad'
+            self.doublet_gate = MADDoubletGate(mad_threshold=mad)
+            
         self.time_channel_index = time_channel_index
+        self.skip_doublet_removal = False
+        self.skip_debris_removal = False
+        self.standardized_names = None
+        self._debug_info = {}
 
     def process_fcs_data(self, marker_names: list[str], fcs_array: np.ndarray) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         """
@@ -49,7 +100,7 @@ class FlowMOP:
             raise ValueError("The number of marker names does not match the number of dimensions in the FCS array.")
 
         # Remove events at the limit of detection
-        filtered_data, lod_vector = self._remove_limit_of_detection_events(fcs_array, marker_names)
+        filtered_data, lod_vector = self.remove_limit_of_detection_events(fcs_array, marker_names)
         
         # Initialize vectors
         vectors = {
@@ -60,7 +111,7 @@ class FlowMOP:
         }
 
         # Apply debris gating
-        if filtered_data is not None:
+        if filtered_data is not None and not self.skip_debris_removal:
             filtered_data, _, vectors['debris'] = self.debris_gate.gate(filtered_data, marker_names)
 
         # Apply time gating
@@ -68,7 +119,7 @@ class FlowMOP:
             filtered_data, vectors['time'] = self.time_gate.gate(filtered_data, self.time_channel_index)
 
         # Apply doublet gating
-        if filtered_data is not None:
+        if filtered_data is not None and not self.skip_doublet_removal:
             filtered_data, vectors['doublet'] = self.doublet_gate.gate(filtered_data, marker_names)
 
         # Calculate final vector
@@ -77,7 +128,7 @@ class FlowMOP:
 
         return filtered_data, vectors
 
-    def _remove_limit_of_detection_events(self, fcs_array: np.ndarray, marker_names: list[str]) -> Tuple[np.ndarray, np.ndarray]:
+    def remove_limit_of_detection_events(self, fcs_array: np.ndarray, marker_names: list[str]) -> Tuple[np.ndarray, np.ndarray]:
         """Remove events at the limit of detection."""
         try:
             fsca_column = self._get_marker_index(marker_names, 'fsca')
@@ -132,3 +183,16 @@ class FlowMOP:
         results = self.process_fcs_data(marker_names, fcs_array)
         self.export_to_csv(output_file, fcs_array, marker_names, results[1])
         return results
+
+    def get_debug_info(self) -> dict:
+        """
+        Get debugging information from the last pipeline run.
+        Includes information from each gating step if available.
+        """
+        debug_info = {
+            'time_gate': getattr(self.time_gate, 'get_debug_info', lambda: {})(),
+            'debris_gate': getattr(self.debris_gate, 'get_debug_info', lambda: {})(),
+            'doublet_gate': getattr(self.doublet_gate, 'get_debug_info', lambda: {})()
+        }
+        debug_info.update(self._debug_info)
+        return debug_info
