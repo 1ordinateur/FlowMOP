@@ -7,7 +7,8 @@ import numpy as np
 from abc import ABC, abstractmethod
 import warnings
 from scipy import stats
-from scipy.signal import savgol_filter
+import matplotlib.pyplot as plt
+from flowmop_utils import process_histogram, find_peaks, find_left_minimum
 
 class DoubletGateStrategy(ABC):
     @abstractmethod
@@ -46,6 +47,18 @@ class DoubletGateStrategy(ABC):
             ssc_h_idx = standardized_names.index('ssch')
         except ValueError:
             raise ValueError("Required scatter parameters not found.")
+        
+        # Set negative values to 0 and clip top 0.1 percentile outliers
+        data[:, [fsc_a_idx, fsc_h_idx, ssc_a_idx, ssc_h_idx]] = np.clip(
+            data[:, [fsc_a_idx, fsc_h_idx, ssc_a_idx, ssc_h_idx]], 
+            0, 
+            None
+        )
+
+        # Calculate 99.9th percentile for each channel and clip values above it
+        for idx in [fsc_a_idx, fsc_h_idx, ssc_a_idx, ssc_h_idx]:
+            p999 = np.percentile(data[:, idx], 99.9)
+            data[:, idx] = np.clip(data[:, idx], None, p999)
 
         # Calculate ratios with handling for division by zero and negative values
         fsc_ratio = np.divide(data[:, fsc_a_idx], data[:, fsc_h_idx], 
@@ -54,7 +67,6 @@ class DoubletGateStrategy(ABC):
         ssc_ratio = np.divide(data[:, ssc_a_idx], data[:, ssc_h_idx],
                             out=np.full_like(data[:, ssc_a_idx], np.nan),
                             where=data[:, ssc_h_idx] > 0)
-        
         return fsc_ratio, ssc_ratio
 
     @staticmethod
@@ -63,21 +75,88 @@ class DoubletGateStrategy(ABC):
         import re
         return re.sub(r'[^a-zA-Z0-9]', '', name).lower()
 
+    def plot_ratio_histograms(self, fsc_ratio: np.ndarray, ssc_ratio: np.ndarray, 
+                            fsc_threshold: float, ssc_threshold: float,
+                            title: str = "Doublet Gating Thresholds") -> None:
+        """
+        Plot histogram of FSC ratio with threshold, peaks, and derivatives.
+        
+        Args:
+            fsc_ratio: Forward scatter ratio values
+            ssc_ratio: Not used (kept for backward compatibility)
+            fsc_threshold: FSC threshold value
+            ssc_threshold: Not used (kept for backward compatibility)
+            title: Plot title
+        """
+        fig = plt.figure(figsize=(15, 10))
+        gs = plt.GridSpec(2, 2, figure=fig)
+        ax_hist = fig.add_subplot(gs[0, :])  # Top row: histogram
+        ax_deriv1 = fig.add_subplot(gs[1, 0])  # Bottom left: first derivative
+        ax_deriv2 = fig.add_subplot(gs[1, 1])  # Bottom right: second derivative
+        
+        # Process histogram using flowmop_utils function
+        fsc_data = fsc_ratio[~np.isnan(fsc_ratio)]
+        fsc_data = np.clip(fsc_data, 0, None)
+        
+        # Process histogram with smoothing
+        print("plotting")
+        fsc_hist = process_histogram(fsc_data, smoothing_window=2)
+        
+        if fsc_hist is not None:
+            smoothed_hist, bin_edges, peak_indices, _ = fsc_hist
+            bin_centers = (bin_edges[1:] + bin_edges[:-1]) / 2
+            
+            # Plot main histogram
+            ax_hist.plot(bin_edges[:-1], smoothed_hist, 'b-', alpha=0.6, label='FSC Ratio Distribution')
+            ax_hist.axvline(fsc_threshold, color='r', linestyle='--', linewidth=2, 
+                          label=f'Threshold: {fsc_threshold:.2f}')
+            
+            # Plot detected peaks
+            for peak_idx in peak_indices:
+                ax_hist.plot(bin_edges[peak_idx], smoothed_hist[peak_idx], 'go', 
+                           markersize=10, label='Peak' if peak_idx == peak_indices[0] else None)
+            
+            ax_hist.set_title('FSC-A/FSC-H Ratio Distribution')
+            ax_hist.set_xlabel('FSC-A/FSC-H Ratio')
+            ax_hist.set_ylabel('Count')
+            ax_hist.set_xlim(0, min(5, fsc_threshold * 2))
+            ax_hist.legend()
+            ax_hist.grid(True, alpha=0.3)
+            
+            # Calculate derivatives
+            first_derivative = np.gradient(smoothed_hist, bin_centers)
+            second_derivative = np.gradient(first_derivative, bin_centers)
+            
+            # Plot first derivative
+            ax_deriv1.plot(bin_centers, first_derivative, 'r-', label='First Derivative')
+            ax_deriv1.axvline(fsc_threshold, color='r', linestyle='--', linewidth=2)
+            ax_deriv1.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+            ax_deriv1.set_title('First Derivative')
+            ax_deriv1.set_xlabel('FSC-A/FSC-H Ratio')
+            ax_deriv1.set_ylabel('First Derivative')
+            ax_deriv1.set_xlim(0, min(5, fsc_threshold * 2))
+            ax_deriv1.grid(True, alpha=0.3)
+            ax_deriv1.legend()
+            
+            # Plot second derivative
+            ax_deriv2.plot(bin_centers, second_derivative, 'g-', label='Second Derivative')
+            ax_deriv2.axvline(fsc_threshold, color='r', linestyle='--', linewidth=2)
+            ax_deriv2.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+            ax_deriv2.set_title('Second Derivative')
+            ax_deriv2.set_xlabel('FSC-A/FSC-H Ratio')
+            ax_deriv2.set_ylabel('Second Derivative')
+            ax_deriv2.set_xlim(0, min(5, fsc_threshold * 2))
+            ax_deriv2.grid(True, alpha=0.3)
+            ax_deriv2.legend()
+        
+        plt.tight_layout()
+        plt.show()
+
 class MADDoubletGate(DoubletGateStrategy):
     def __init__(self, mad_threshold=5):
         self.mad_threshold = mad_threshold
 
     def gate(self, data: np.ndarray, marker_names: list[str]) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Apply MAD-based doublet gating to the data.
-        
-        Args:
-            data: Flow cytometry data array
-            marker_names: List of marker names
-            
-        Returns:
-            tuple: (filtered_data, doublet_vector)
-        """
         if not self._check_required_parameters(marker_names):
             return data, np.ones(data.shape[0], dtype=int)
 
@@ -127,6 +206,7 @@ class InflectionDoubletGate(DoubletGateStrategy):
     def gate(self, data: np.ndarray, marker_names: list[str]) -> tuple[np.ndarray, np.ndarray]:
         """
         Apply inflection point-based doublet gating to the data.
+        Falls back to MAD-based thresholding if inflection method fails.
         
         Args:
             data: Flow cytometry data array
@@ -138,85 +218,126 @@ class InflectionDoubletGate(DoubletGateStrategy):
         if not self._check_required_parameters(marker_names):
             return data, np.ones(data.shape[0], dtype=int)
 
-        try:
-            # Step 1: Calculate ratios
-            fsc_ratio, ssc_ratio = self._calculate_ratios(data, marker_names)
-            self._debug_info['ratios'] = {'fsc': fsc_ratio, 'ssc': ssc_ratio}
+        # Step 1: Calculate ratios
+        fsc_ratio, ssc_ratio = self._calculate_ratios(data, marker_names)
+        self._debug_info['ratios'] = {'fsc': fsc_ratio}
 
-            # Step 2: Generate histograms
-            fsc_hist = self._generate_smooth_histogram(fsc_ratio)
-            ssc_hist = self._generate_smooth_histogram(ssc_ratio)
-            self._debug_info['histograms'] = {'fsc': fsc_hist, 'ssc': ssc_hist}
+        # Try inflection point method first
+        inflection_success = False
+        fsc_threshold = None
 
-            # Step 3: Find inflection points
-            fsc_inflections = self._find_inflection_points(fsc_hist[2])  # Using smoothed counts
-            ssc_inflections = self._find_inflection_points(ssc_hist[2])
-            self._debug_info['inflections'] = {'fsc': fsc_inflections, 'ssc': ssc_inflections}
+        # Step 2: Generate histogram starting from ratio = 1
+        fsc_hist, fsc_bin_edges, fsc_peaks = self._generate_smooth_histogram(fsc_ratio)
+        self._debug_info['histograms'] = {'fsc': fsc_hist}
 
-            # Step 4: Get thresholds
-            fsc_threshold = self._get_threshold_from_inflection(fsc_ratio, fsc_hist, fsc_inflections)
-            ssc_threshold = self._get_threshold_from_inflection(ssc_ratio, ssc_hist, ssc_inflections)
-            self._debug_info['thresholds'] = {'fsc': fsc_threshold, 'ssc': ssc_threshold}
+        if len(fsc_hist) > 0:  # Check if histogram generation was successful
+            # Step 3: Find peaks
+            
+            if len(fsc_peaks) >= 2:
+                # Get peak densities and find the maximum peak
+                peak_densities = fsc_hist[fsc_peaks]
+                max_peak_idx = np.argmax(peak_densities)
+                max_peak_bin_value = fsc_bin_edges[fsc_peaks[max_peak_idx]]
+                
+                # Only consider peaks after the maximum peak
+                if max_peak_idx < len(fsc_peaks) - 1:
+                    potential_valleys = []
+                    
+                    # First, find the valley between max peak and next peak
+                    start_idx = fsc_peaks[max_peak_idx]
+                    end_idx = fsc_peaks[max_peak_idx + 1]
+                    print("Start and end indices: ", start_idx, end_idx)
+                    valley_idx = start_idx + np.argmin(fsc_hist[start_idx:end_idx])
+                    # Plot the histogram segment between peaks
+                    valley_position = fsc_bin_edges[valley_idx]
 
-        except ValueError as e:
-            warnings.warn(f"Error in inflection point analysis: {str(e)}. Using MAD-based thresholds.")
-            return self._fallback_to_mad(data, fsc_ratio, ssc_ratio)
+                    potential_valleys.append(valley_position)
+                    # Then check for additional valleys between subsequent peaks
+                    # but only if they're not beyond the max peak's bin value
+                    for i in range(max_peak_idx + 1, len(fsc_peaks) - 1):
+                        # Stop if we've reached a peak beyond the max peak's bin value
+                        if fsc_bin_edges[fsc_peaks[i]] > max_peak_bin_value:
+                            break
+                            
+                        start_idx = fsc_peaks[i]
+                        end_idx = fsc_peaks[i + 1]
+                        valley_idx = start_idx + np.argmin(fsc_hist[start_idx:end_idx])
+                        valley_position = fsc_bin_edges[valley_idx]
+                        
+                        # Only consider valleys not beyond max peak bin value
+                        if valley_position <= max_peak_bin_value:
+                            potential_valleys.append(valley_position)
+                    
+                    # Take the smallest valley
+                    if potential_valleys:
+                        fsc_threshold = min(potential_valleys)
+                        inflection_success = True
 
-        # Apply thresholds
-        doublet_vector = ((fsc_ratio <= fsc_threshold) & 
-                         (ssc_ratio <= ssc_threshold)).astype(int)
-        filtered_data = data[doublet_vector == 1]
+        # Fall back to MAD-based thresholding if inflection method failed
+        if not inflection_success:
+            warnings.warn("Inflection point method failed to find threshold. Falling back to MAD-based thresholding.")
+            # Use MAD threshold calculation
+            mad_gate = MADDoubletGate(mad_threshold=self.fallback_mad_threshold)
+            filtered_data, doublet_vector = mad_gate.gate(data, marker_names)
+            
+            # Get the threshold that was used for plotting
+            valid_ratios = fsc_ratio[~np.isnan(fsc_ratio)]
+            fsc_threshold = np.median(valid_ratios) + self.fallback_mad_threshold * stats.median_abs_deviation(valid_ratios)
+        else:
+            # Apply inflection-based threshold
+            doublet_vector = (fsc_ratio <= fsc_threshold).astype(int)
+            filtered_data = data[doublet_vector == 1]
+            
+        self._debug_info['thresholds'] = {'fsc': fsc_threshold}
+        
+        # Plot the ratio histograms with derivatives
+        self.plot_ratio_histograms(fsc_ratio, ssc_ratio, fsc_threshold, fsc_threshold)
         
         return filtered_data, doublet_vector
 
-    def _generate_smooth_histogram(self, data: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _generate_smooth_histogram(self, data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """
-        Generate smoothed histogram using Gaussian KDE.
+        Generate smoothed histogram using process_histogram from flowmop_utils.
+        Only considers ratios >= 1 since values below 1 are not biologically meaningful
+        (would mean height > area which is physically impossible).
         
         Args:
             data: Input ratio data
             
         Returns:
-            tuple: (counts, bin_edges, smoothed_counts)
+            tuple: (smoothed_hist, bin_edges)
         """
-        # Remove NaN values for histogram generation
+        # Remove NaN values and restrict to biologically meaningful ratios (>= 1)
         data = data[~np.isnan(data)]
+        data = data[data >= 1]  # Only consider ratios >= 1
         
-        # Generate histogram
-        counts, bin_edges = np.histogram(data, bins=self.bins)
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-        # Apply KDE smoothing
-        kde = stats.gaussian_kde(data, bw_method=self.smoothing_factor)
-        smoothed_counts = kde(bin_centers) * len(data) * (bin_edges[1] - bin_edges[0])
+        # Clip outliers at 99th percentile
+        q99 = np.quantile(data, 0.99)
+        data = np.clip(data, None, q99)
         
-        return counts, bin_edges, smoothed_counts
-
-    def _find_inflection_points(self, curve: np.ndarray) -> np.ndarray:
-        """
-        Detect inflection points using second derivative.
+        # Use process_histogram with a reasonable smoothing window
+        hist_result = process_histogram(data, smoothing_window=5, num_bins=100)
         
-        Args:
-            curve: Smoothed histogram curve
+        if hist_result is None:
+            return np.array([]), np.array([])
             
-        Returns:
-            np.ndarray: Indices of inflection points
-        """
-        # Apply Savitzky-Golay filter for noise reduction
-        smoothed = savgol_filter(curve, window_length=7, polyorder=3)
+        smoothed_hist, bin_edges, peak_indices, peak_densities = hist_result
         
-        # Calculate second derivative
-        second_derivative = np.gradient(np.gradient(smoothed))
+        # Plot the histogram
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(10, 6))
+        plt.hist(data, bins=bin_edges, alpha=0.5, density=True, label='Raw Data')
+        plt.plot((bin_edges[:-1] + bin_edges[1:]) / 2, smoothed_hist, 'r-', label='Smoothed')
+        if len(peak_indices) > 0:
+            print("Peaks: ", peak_indices)
+            plt.plot(bin_edges[peak_indices], smoothed_hist[peak_indices], 'go', label='Peaks')
+        plt.xlabel('Ratio')
+        plt.ylabel('Density')
+        plt.title('Ratio Distribution')
+        plt.legend()
+        plt.show()
         
-        # Find zero crossings of second derivative
-        zero_crossings = np.where(np.diff(np.signbit(second_derivative)))[0]
-        
-        # Filter weak inflection points
-        strength_threshold = np.max(np.abs(second_derivative)) * 0.1
-        strong_points = [i for i in zero_crossings 
-                        if abs(second_derivative[i]) > strength_threshold]
-        
-        return np.array(strong_points)
+        return smoothed_hist, bin_edges, peak_indices
 
     def _get_threshold_from_inflection(self, ratio: np.ndarray, hist: tuple, inflections: np.ndarray) -> float:
         """
@@ -231,6 +352,7 @@ class InflectionDoubletGate(DoubletGateStrategy):
             float: Threshold value
         """
         if len(inflections) == 0:
+            print("no inflections")
             return self._calculate_mad_threshold(ratio)
 
         # Find the main peak

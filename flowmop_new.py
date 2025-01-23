@@ -50,7 +50,7 @@ class FlowMOP:
                  smoothing_window=3,
                  percentage_cells_present=3,
                  time_channel_index=None,
-                 doublet_method: Literal['mad', 'inflection'] = 'mad',
+                 doublet_method: Literal['mad', 'inflection'] = 'inflection',
                  doublet_config: Optional[dict] = None,
                  use_gpu: bool = True,
                  chunk_size: Optional[int] = None):
@@ -184,17 +184,17 @@ class FlowMOP:
         vectors = {'lod': lod_vector, 'debris': ones, 'time': ones, 'doublet': ones}
         print("vectors['lod']", vectors['lod'])
         # Apply gating strategies
-        if not self.skip_debris_removal:
-            fcs_array_device = self._prepare_gpu_array(fcs_array) if self.use_gpu else fcs_array
-            _, _, vectors['debris'] = self.debris_gate.gate(fcs_array_device, marker_names)
-            vectors['debris'] = self._persist_if_gpu(vectors['debris'])
-        print("vectors['debris']", vectors['debris'])
         if self.time_channel_index is not None:
             fcs_array_device = self._prepare_gpu_array(fcs_array) if self.use_gpu else fcs_array
             _, vectors['time'] = self.time_gate.gate(fcs_array_device, self.time_channel_index)
             if self._is_gpu_array(vectors['time']):
                 vectors['time'] = self._persist_if_gpu(vectors['time'])
         print("vectors['time']", vectors['time'])
+        if not self.skip_debris_removal:
+            fcs_array_device = self._prepare_gpu_array(fcs_array) if self.use_gpu else fcs_array
+            _, _, vectors['debris'] = self.debris_gate.gate(fcs_array_device, marker_names)
+            vectors['debris'] = self._persist_if_gpu(vectors['debris'])
+        print("vectors['debris']", vectors['debris'])
         if not self.skip_doublet_removal:
             fcs_array_device = self._prepare_gpu_array(fcs_array) if self.use_gpu else fcs_array
             _, vectors['doublet'] = self.doublet_gate.gate(fcs_array_device, marker_names)

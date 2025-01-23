@@ -59,6 +59,8 @@ class DaskGPUFSCDebrisGate(DebrisGateStrategy):
             smoothing_window=self.smoothing_window,
             percentage_cells_present=self.percentage_cells_present
         )
+        print("valid_peaks_mask", valid_peaks_mask)
+        print("valid_peaks", valid_peaks)
         self._debug_info['valid_peaks'] = valid_peaks
 
         # Calculate FSC thresholds for each set of valid peaks

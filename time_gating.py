@@ -8,6 +8,7 @@ import numpy.ma as ma
 from scipy.ndimage import maximum_filter1d
 from scipy.interpolate import UnivariateSpline
 from abc import ABC, abstractmethod
+import flowmop_utils
 
 class TimeGateStrategy(ABC):
     @abstractmethod
@@ -43,14 +44,19 @@ class MADTimeGate(TimeGateStrategy):
         # Create time bins with overlap
         breaks = self._make_breaks(events_per_bin, data.shape[0])
         
-        # Detect peaks in all channels
-        peaks = self._determine_peaks_all_channels(data, [time_channel_index], breaks['breaks'])
+        # Get all fluorescence channels (exclude time, FSC, SSC channels)
+        fluoro_channels = [i for i in range(data.shape[1]) 
+                         if i != time_channel_index and not any(x in str(i) for x in ['FSC', 'SSC', 'Time'])]
         
-        # Apply MAD-based outlier detection
-        mad_results = self._mad_excluder(peaks[time_channel_index], self.mad_threshold, breaks['breaks'], data.shape[0])
+        # Detect peaks in all fluorescence channels
+        peaks = self._determine_peaks_all_channels(data, fluoro_channels, breaks['breaks'])
+        # Combine MAD results from all channels
+        time_gate_vector = np.ones(data.shape[0], dtype=bool)
+        for channel_peaks in peaks.values():
+            mad_results = self._mad_excluder(channel_peaks, self.mad_threshold, breaks['breaks'], data.shape[0])
+            time_gate_vector &= mad_results['cells']
         
-        # Create time gate vector and filter data
-        time_gate_vector = mad_results['cells']
+        # Filter data using combined gate vector
         filtered_data = data[time_gate_vector]
         
         return filtered_data, time_gate_vector
@@ -76,18 +82,25 @@ class MADTimeGate(TimeGateStrategy):
         return {'breaks': breaks, 'events_per_bin': events_per_bin}
 
     def _determine_peaks_all_channels(self, data, channels, breaks):
-        """Detect peaks in all channels."""
-        data_reshaped = data[:, channels].T
-
-        def determine_all_peaks_wrapped(x):
-            result = self._determine_all_peaks(x, breaks)
-            return result if result is not None else ma.masked
-
-        determine_all_peaks_vec = np.vectorize(determine_all_peaks_wrapped, signature='(n)->(m)')
-        peak_frames = determine_all_peaks_vec(data_reshaped)
-
-        return {channel: peak_frame for channel, peak_frame in zip(channels, peak_frames) 
-                if not ma.is_masked(peak_frame)}
+        """
+        Detect peaks in all channels, analyzing each time bin separately.
+        
+        Args:
+            data: Flow cytometry data array
+            channels: List of channel indices to analyze
+            breaks: List of time bin indices
+            
+        Returns:
+            Dictionary mapping channel indices to peak information
+        """
+        peak_frames = {}
+        for channel in channels:
+            channel_data = data[:, channel]
+            result = self._determine_all_peaks(channel_data, breaks)
+            if result is not None:
+                peak_frames[channel] = result
+        
+        return peak_frames
 
     def _determine_all_peaks(self, channel_data, breaks):
         """Determine peaks for a single channel."""
@@ -115,7 +128,7 @@ class MADTimeGate(TimeGateStrategy):
         updated_peak_frame = self._update_peak_frame(peaks, most_occurring_peaks)
         return updated_peak_frame[updated_peak_frame['Bin'] != -1]
 
-    def _timegate_peak_detection(self, bin_data, smoothing=2, max_peak=None, window_size=10):
+    def _timegate_peak_detection(self, bin_data, smoothing=2, max_peak=None, window_size=2):
         """Detect peaks in time-gated data."""
         if self.remove_zeros:
             bin_data = bin_data[bin_data != 0]
@@ -123,21 +136,21 @@ class MADTimeGate(TimeGateStrategy):
         if len(bin_data) < 3:
             return np.array([])
         
-        hist, bin_edges = np.histogram(bin_data, bins=100, density=True)
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-        smoothed_hist = np.convolve(hist, np.ones(smoothing), mode='same') / smoothing
-        
-        max_filter = maximum_filter1d(smoothed_hist, size=2 * window_size + 1, mode='constant')
-        maxima = ((smoothed_hist == max_filter) & 
-                 (smoothed_hist > np.roll(smoothed_hist, 1)) & 
-                 (smoothed_hist > np.roll(smoothed_hist, -1)))
-        maxima[:window_size] = maxima[-window_size:] = False
-        
+        # Use shared histogram processing function
+        result = flowmop_utils.process_histogram(bin_data, smoothing_window=window_size, num_bins=100)
+        if result is None:
+            return np.array([])
+            
+        smoothed_hist, bin_edges, peak_indices, peak_densities = result
+        peak_indices = np.array(peak_indices, dtype=int)
         if max_peak is None:
-            max_peak = np.max(hist)
+            max_peak = np.max(smoothed_hist)
         
-        peak_indices = np.where(maxima)[0]
-        filtered_peak_indices = peak_indices[bin_centers[peak_indices] > self.peak_removal * max_peak]
+        # Filter peaks based on threshold
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        peak_values = bin_centers[peak_indices]
+        peak_mask = peak_values > (self.peak_removal * max_peak)
+        filtered_peak_indices = peak_indices[peak_mask]
         
         return bin_centers[filtered_peak_indices]
 
@@ -207,10 +220,9 @@ class MADTimeGate(TimeGateStrategy):
             removed_cells = np.unique(removed_cells)
         else:
             removed_cells = np.array([], dtype=int)
-
+        
         bad_cells = np.ones(nr_cells, dtype=bool)
         bad_cells[removed_cells] = False
-
         return {'cells': bad_cells, 'cell_ids': removed_cells}
 
     @staticmethod

@@ -125,6 +125,7 @@ class FSCDebrisGate(DebrisGateStrategy):
         fsc_column = self._get_fsc_column(marker_names)
         # Get FSC thresholds from valid peaks
         fsc_thresholds = self._get_fsc_thresholds(data, valid_peaks_mask, peaks_list, positive_masks, fsc_column)
+        print("fsc_thresholds: ", fsc_thresholds)
 
         if not fsc_thresholds:
             return data, None, np.ones(data.shape[0], dtype=int)
@@ -179,7 +180,7 @@ class FSCDebrisGate(DebrisGateStrategy):
             raise ValueError("FSC-A parameter not found in marker names.")
 
     def _has_low_peak(self, bin_edges: np.ndarray, peak_indices: np.ndarray, 
-                     lowest_reference_pos: float, tolerance: float = 1.05) -> bool:
+                     lowest_reference_pos: float, tolerance: float = 1.15) -> bool:
         """Check if any peaks are near or below the reference lowest peak."""
         return any(bin_edges[idx] <= lowest_reference_pos * tolerance for idx in peak_indices)
 
@@ -226,6 +227,8 @@ class FSCDebrisGate(DebrisGateStrategy):
         # Get the lowest FSC peak position from reference
         lowest_reference_peak_pos = reference_peaks[0][1]
         smoothed_hist, pos_bin_edges, pos_peak_indices, peak_densities = process_histogram_result
+
+        print("pos_peak_indices: ", pos_peak_indices)
         
         # Check if we have any peaks near or below the reference lowest peak
         if not self._has_low_peak(pos_bin_edges, pos_peak_indices, lowest_reference_peak_pos):
@@ -285,7 +288,6 @@ def detect_fluoropeaks(data: np.ndarray, marker_names: List[str], min_peaks: int
             continue
             
         # Process histogram and get peaks
-        print(f"Processing marker: {marker}")
         result = process_histogram(data_transformed[i], smoothing_window)
         if result is None:
             print(f"No valid histogram for marker {marker}")

@@ -30,7 +30,7 @@ def analyze_histogram(data: np.ndarray, num_bins: int, smoothing_window: int, fi
         HistogramAnalysis object
     """
 
-    min_val, max_val = np.percentile(data, [0.1, 99.9])
+    min_val, max_val = np.quantile(data, [0.001, 0.999])
     bin_edges = np.linspace(min_val, max_val, num_bins + 1)
     hist, _ = np.histogram(data, bins=bin_edges, density=True)
 
@@ -127,7 +127,7 @@ def find_left_minimum(hist: np.ndarray, start_idx: int, smoothing_window: int) -
     
     return idx
 
-def process_histogram(feature: np.ndarray, smoothing_window: int, num_bins: int = 100) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def process_histogram(feature: np.ndarray, smoothing_window: int, num_bins: int = 100, filter_extremes: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Process histogram and find peaks.
     
@@ -140,7 +140,7 @@ def process_histogram(feature: np.ndarray, smoothing_window: int, num_bins: int 
         Tuple of (thresholded_hist, bin_edges, peak_indices, peak_densities)
         Returns None only if histogram analysis fails
     """
-    hist_analysis = analyze_histogram(feature, num_bins=num_bins, smoothing_window=smoothing_window)
+    hist_analysis = analyze_histogram(feature, num_bins=num_bins, smoothing_window=smoothing_window, filter_extremes=filter_extremes)
     
     if hist_analysis.smoothed_hist is None:
         return None
