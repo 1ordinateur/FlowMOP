@@ -17,7 +17,7 @@ class HistogramAnalysis(NamedTuple):
     bin_edges: np.ndarray
     smoothed_hist: np.ndarray
 
-def analyze_histogram(data: np.ndarray, num_bins: int, smoothing_window: int) -> HistogramAnalysis:
+def analyze_histogram(data: np.ndarray, num_bins: int, smoothing_window: int, filter_extremes: bool = True) -> HistogramAnalysis:
     """
     Analyze histogram of data.
     
@@ -29,18 +29,20 @@ def analyze_histogram(data: np.ndarray, num_bins: int, smoothing_window: int) ->
     Returns:
         HistogramAnalysis object
     """
-    min_val, max_val = np.min(data), np.max(data)
+
+    min_val, max_val = np.percentile(data, [0.1, 99.9])
     bin_edges = np.linspace(min_val, max_val, num_bins + 1)
     hist, _ = np.histogram(data, bins=bin_edges, density=True)
+
+    # Zero out low-density bins (less than 1% of max density)
+    if filter_extremes:
+        density_threshold = np.max(hist) * 0.02
+        hist[hist < density_threshold] = 0
     
     # Zero out extremes
     bottom_bins = int(num_bins * 0.02)
     top_bins = int(num_bins * 0.98)
     hist[:bottom_bins] = hist[top_bins:] = 0
-
-    # Zero out low-density bins (less than 1% of max density)
-    density_threshold = np.max(hist) * 0.02
-    hist[hist < density_threshold] = 0
     
     # Zero out bins below average density threshold
     avg_density_threshold = np.sum(hist) / len(hist) * 0.5
@@ -48,12 +50,12 @@ def analyze_histogram(data: np.ndarray, num_bins: int, smoothing_window: int) ->
     
     # Smooth histogram
     smoothed_hist = np.convolve(hist, np.ones(smoothing_window) / smoothing_window, mode='same')
-    
     return HistogramAnalysis(hist=hist, bin_edges=bin_edges, smoothed_hist=smoothed_hist)
 
 def find_peaks(hist: np.ndarray, smoothing_window: int) -> np.ndarray:
     """
     Find peaks in histogram, ensuring they are separated by at least the smoothing window.
+    Also plots the histogram and detected peaks for visualization.
     
     Args:
         hist: Input histogram
@@ -63,12 +65,10 @@ def find_peaks(hist: np.ndarray, smoothing_window: int) -> np.ndarray:
         Array of peak indices
     """
     # Find points that are higher than their immediate neighbors
-    maxima = (hist > np.roll(hist, 1)) & (hist > np.roll(hist, -1))
+    maxima = (hist >= np.roll(hist, 1)) & (hist >= np.roll(hist, -1))
     maxima[:smoothing_window] = maxima[-smoothing_window:] = False
-    
     # Get initial peak candidates
     peak_candidates = np.where(maxima)[0]
-    
     if len(peak_candidates) == 0:
         return peak_candidates
         
@@ -84,7 +84,7 @@ def find_peaks(hist: np.ndarray, smoothing_window: int) -> np.ndarray:
         if window_max_idx == peak_idx:
             valid_peaks.append(peak_idx)
     
-    return np.array(valid_peaks)
+    return valid_peaks
 
 def calculate_peak_densities(hist: np.ndarray, peak_indices: np.ndarray, 
                            smoothing_window: int) -> List[float]:
@@ -138,16 +138,15 @@ def process_histogram(feature: np.ndarray, smoothing_window: int, num_bins: int 
             
     Returns:
         Tuple of (thresholded_hist, bin_edges, peak_indices, peak_densities)
+        Returns None only if histogram analysis fails
     """
     hist_analysis = analyze_histogram(feature, num_bins=num_bins, smoothing_window=smoothing_window)
     
     if hist_analysis.smoothed_hist is None:
         return None
-            
+
     peak_indices = find_peaks(hist_analysis.smoothed_hist, smoothing_window)
-    if len(peak_indices) <= 1:
-        return None
-        
+    # Always calculate peak densities, even with one peak
     peak_densities = calculate_peak_densities(hist_analysis.smoothed_hist, peak_indices, smoothing_window)
     return hist_analysis.smoothed_hist, hist_analysis.bin_edges, peak_indices, peak_densities
 
