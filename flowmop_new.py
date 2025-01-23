@@ -4,27 +4,36 @@ Main integration module that coordinates the gating operations.
 """
 
 import warnings
-from typing import Optional, Tuple, Dict, Literal, Union
-import dask.array as da
+from typing import Optional, Tuple, Dict, Literal, Union, Any
 import numpy as np
+
+# Runtime array type
+ArrayType = np.ndarray
+DEFAULT_ARRAY_MODULE = np
 
 # Try importing GPU acceleration libraries
 try:
     import cupy as cp
+    import dask.array as da
     HAS_GPU = True
+    ArrayType = da.Array
+    DEFAULT_ARRAY_MODULE = da
 except ImportError:
     HAS_GPU = False
     warnings.warn("GPU acceleration not available. Using CPU implementation.")
 
-from .time_gating import TimeGateStrategy, MADTimeGate
-from .debris_gating import DebrisGateStrategy, FSCDebrisGate
-from .doublet_gating import DoubletGateStrategy, MADDoubletGate, InflectionDoubletGate
-from .debris_gating_accelerated import DaskGPUFSCDebrisGate
-from .doublet_gating_accelerated import DaskGPUMADDoubletGate, DaskGPUInflectionDoubletGate
-from .time_gating_accelerated import DaskGPUMADTimeGate
+# Type hint that works with type checkers
+StaticArrayType = Union[np.ndarray, 'da.Array']
 
-# Type aliases
-ArrayType = Union[np.ndarray, da.Array]
+from time_gating import TimeGateStrategy, MADTimeGate
+from debris_gating import DebrisGateStrategy, FSCDebrisGate
+from doublet_gating import DoubletGateStrategy, MADDoubletGate, InflectionDoubletGate
+
+# Only import GPU-accelerated classes if GPU is available
+if HAS_GPU:
+    from debris_gating_accelerated import DaskGPUFSCDebrisGate
+    from doublet_gating_accelerated import DaskGPUMADDoubletGate, DaskGPUInflectionDoubletGate
+    from time_gating_accelerated import DaskGPUMADTimeGate
 
 class FlowMOP:
     """Main class for the Flow Cytometry Multi-Operation Pipeline."""
@@ -35,12 +44,9 @@ class FlowMOP:
                  max_bins=500,
                  step=200,
                  MAD=6,
-                 IT_limit=0.6,
-                 peak_detection_smoothing=2,
-                 spectral=False,
                  mad=5,
                  min_peaks=2,
-                 max_peaks=3,
+                 max_peaks=5,
                  smoothing_window=3,
                  percentage_cells_present=3,
                  time_channel_index=None,
@@ -78,64 +84,45 @@ class FlowMOP:
         self.use_gpu = use_gpu and HAS_GPU
         self.chunk_size = chunk_size
         
-        # Configure time gating
-        if self.use_gpu:
-            self.time_gate = DaskGPUMADTimeGate(
-                remove_zeros=remove_zeros,
-                min_cells=min_cells,
-                max_bins=max_bins,
-                step=step,
-                mad_threshold=MAD,
-                peak_removal=1/3,
-                min_nr_bins_peakdetection=5
-            )
-        else:
-            self.time_gate = MADTimeGate(
-                remove_zeros=remove_zeros,
-                min_cells=min_cells,
-                max_bins=max_bins,
-                step=step,
-                mad_threshold=MAD,
-                peak_removal=1/3,
-                min_nr_bins_peakdetection=5
-            )
+        # Common parameters for all gating strategies
+        time_params = {
+            'remove_zeros': remove_zeros,
+            'min_cells': min_cells,
+            'max_bins': max_bins,
+            'step': step,
+            'mad_threshold': MAD,
+            'peak_removal': 1/3,
+            'min_nr_bins_peakdetection': 5
+        }
         
-        # Configure debris gating
-        if self.use_gpu:
-            self.debris_gate = DaskGPUFSCDebrisGate(
-                min_peaks=min_peaks,
-                max_peaks=max_peaks,
-                smoothing_window=smoothing_window,
-                percentage_cells_present=percentage_cells_present
-            )
-        else:
-            self.debris_gate = FSCDebrisGate(
-                min_peaks=min_peaks,
-                max_peaks=max_peaks,
-                smoothing_window=smoothing_window,
-                percentage_cells_present=percentage_cells_present
-            )
+        debris_params = {
+            'min_peaks': min_peaks,
+            'max_peaks': max_peaks,
+            'smoothing_window': smoothing_window,
+            'percentage_cells_present': percentage_cells_present,
+            'num_bins': 100
+        }
         
-        # Configure doublet gating based on method
+        # Configure gating strategies based on GPU availability
+        self.time_gate = (DaskGPUMADTimeGate(**time_params) if self.use_gpu 
+                         else MADTimeGate(**time_params))
+        
+        self.debris_gate = (DaskGPUFSCDebrisGate(**debris_params) if self.use_gpu 
+                           else FSCDebrisGate(**debris_params))
+        
+        # Configure doublet gating
+        doublet_config = doublet_config or {}
         if doublet_method == 'inflection':
-            config = doublet_config or {}
-            if self.use_gpu:
-                self.doublet_gate = DaskGPUInflectionDoubletGate(
-                    bins=config.get('bins', 'auto'),
-                    smoothing_factor=config.get('smoothing_factor', 0.5),
-                    fallback_mad_threshold=config.get('fallback_mad_threshold', 5)
-                )
-            else:
-                self.doublet_gate = InflectionDoubletGate(
-                    bins=config.get('bins', 'auto'),
-                    smoothing_factor=config.get('smoothing_factor', 0.5),
-                    fallback_mad_threshold=config.get('fallback_mad_threshold', 5)
-                )
-        else:  # 'mad'
-            if self.use_gpu:
-                self.doublet_gate = DaskGPUMADDoubletGate(mad_threshold=mad)
-            else:
-                self.doublet_gate = MADDoubletGate(mad_threshold=mad)
+            config = {
+                'bins': doublet_config.get('bins', 'auto'),
+                'smoothing_factor': doublet_config.get('smoothing_factor', 0.5),
+                'fallback_mad_threshold': doublet_config.get('fallback_mad_threshold', 5)
+            }
+            self.doublet_gate = (DaskGPUInflectionDoubletGate(**config) if self.use_gpu 
+                                else InflectionDoubletGate(**config))
+        else:
+            self.doublet_gate = (DaskGPUMADDoubletGate(mad_threshold=mad) if self.use_gpu 
+                                else MADDoubletGate(mad_threshold=mad))
             
         self.time_channel_index = time_channel_index
         self.skip_doublet_removal = False
@@ -143,34 +130,37 @@ class FlowMOP:
         self.standardized_names = None
         self._debug_info = {}
 
-    def _prepare_gpu_array(self, data: np.ndarray) -> da.Array:
-        """Convert numpy array to GPU-backed DASK array."""
-        if not isinstance(data, da.Array):
-            # Create DASK array with appropriate chunks
-            dask_array = da.from_array(data, chunks=(self.chunk_size, -1))
-            
-            if self.use_gpu:
-                # Move data to GPU using map_blocks
-                def to_gpu(block):
-                    return cp.asarray(block)
-                return dask_array.map_blocks(to_gpu)
-            return dask_array
+    def _create_array(self, shape: tuple, dtype: Any = np.int32, chunks: Optional[tuple] = None) -> StaticArrayType:
+        """Create an array with the appropriate type based on GPU availability."""
+        if self.use_gpu and HAS_GPU:
+            return DEFAULT_ARRAY_MODULE.ones(shape, chunks=chunks, dtype=cp.int32 if self.use_gpu else dtype)
+        return np.ones(shape, dtype=dtype)
+
+    def _is_gpu_array(self, arr: StaticArrayType) -> bool:
+        """Check if array is a GPU-backed array."""
+        return HAS_GPU and isinstance(arr, ArrayType)
+
+    def _persist_if_gpu(self, arr: StaticArrayType) -> StaticArrayType:
+        """Persist array if it's a GPU array."""
+        return arr.persist() if self._is_gpu_array(arr) else arr
+
+    def _prepare_gpu_array(self, data: np.ndarray) -> StaticArrayType:
+        """Convert numpy array to GPU-backed DASK array if GPU is available."""
+        if not self.use_gpu or not HAS_GPU:
+            return data
+        if not self._is_gpu_array(data):
+            return da.from_array(data, chunks=(self.chunk_size, -1)).map_blocks(cp.asarray)
         return data
 
-    def _finalize_array(self, data: da.Array) -> np.ndarray:
-        """Convert GPU-backed DASK array back to numpy array."""
-        if isinstance(data, da.Array):
-            if self.use_gpu:
-                # Move data back to CPU if needed
-                def to_cpu(block):
-                    if isinstance(block, cp.ndarray):
-                        return cp.asnumpy(block)
-                    return block
-                return data.map_blocks(to_cpu).compute()
-            return data.compute()
+    def _finalize_array(self, data: StaticArrayType) -> np.ndarray:
+        """Convert GPU-backed DASK array back to numpy array if needed."""
+        if not self.use_gpu or not HAS_GPU:
+            return data
+        if self._is_gpu_array(data):
+            return data.map_blocks(lambda x: cp.asnumpy(x) if isinstance(x, cp.ndarray) else x).compute()
         return data
 
-    def process_fcs_data(self, marker_names: list[str], fcs_array: ArrayType) -> Tuple[ArrayType, Dict[str, ArrayType]]:
+    def process_fcs_data(self, marker_names: list[str], fcs_array: StaticArrayType) -> Dict[str, StaticArrayType]:
         """
         Process FCS data through the gating pipeline.
         
@@ -179,90 +169,73 @@ class FlowMOP:
             fcs_array: Array containing FCS data (numpy array or dask array)
             
         Returns:
-            tuple: (filtered_data, filter_vectors)
+            Dict[str, StaticArrayType]: Dictionary of filter vectors for each gating step
         """
         if len(marker_names) != fcs_array.shape[1]:
             raise ValueError("The number of marker names does not match the number of dimensions in the FCS array.")
 
-        # Convert input to GPU-backed DASK array if using GPU
+        # Initialize processing
         if self.use_gpu:
             fcs_array = self._prepare_gpu_array(fcs_array)
+        _, lod_vector = self.remove_limit_of_detection_events(fcs_array, marker_names)
 
-        # Remove events at the limit of detection
-        filtered_data, lod_vector = self.remove_limit_of_detection_events(fcs_array, marker_names)
-        
-        # Initialize vectors with appropriate array type
-        if isinstance(fcs_array, da.Array):
-            ones = da.ones(fcs_array.shape[0], chunks=fcs_array.chunks[0], dtype=cp.int32 if self.use_gpu else np.int32)
-        else:
-            ones = np.ones(fcs_array.shape[0], dtype=np.int32)
-            
-        vectors = {
-            'lod': lod_vector,
-            'debris': ones,
-            'time': ones,
-            'doublet': ones
-        }
-
-        # Apply debris gating
-        if filtered_data is not None and not self.skip_debris_removal:
-            filtered_data, _, vectors['debris'] = self.debris_gate.gate(filtered_data, marker_names)
-            if isinstance(vectors['debris'], da.Array):
-                vectors['debris'] = vectors['debris'].persist()
-
-        # Apply time gating
-        if filtered_data is not None and self.time_channel_index is not None:
-            # Ensure data is in GPU memory for time gating
-            if self.use_gpu and not isinstance(filtered_data, da.Array):
-                filtered_data = self._prepare_gpu_array(filtered_data)
-            
-            # Apply time gating
-            filtered_data, vectors['time'] = self.time_gate.gate(filtered_data, self.time_channel_index)
-            
-            # Persist results if using DASK
-            if isinstance(vectors['time'], da.Array):
-                vectors['time'] = vectors['time'].persist()
-                filtered_data = filtered_data.persist()
-
-        # Apply doublet gating
-        if filtered_data is not None and not self.skip_doublet_removal:
-            filtered_data, vectors['doublet'] = self.doublet_gate.gate(filtered_data, marker_names)
-            if isinstance(vectors['doublet'], da.Array):
-                vectors['doublet'] = vectors['doublet'].persist()
+        # Initialize vectors
+        ones = self._create_array(fcs_array.shape[0], chunks=fcs_array.chunks[0] if self._is_gpu_array(fcs_array) else None)
+        vectors = {'lod': lod_vector, 'debris': ones, 'time': ones, 'doublet': ones}
+        print("vectors['lod']", vectors['lod'])
+        # Apply gating strategies
+        if not self.skip_debris_removal:
+            fcs_array_device = self._prepare_gpu_array(fcs_array) if self.use_gpu else fcs_array
+            _, _, vectors['debris'] = self.debris_gate.gate(fcs_array_device, marker_names)
+            vectors['debris'] = self._persist_if_gpu(vectors['debris'])
+        print("vectors['debris']", vectors['debris'])
+        if self.time_channel_index is not None:
+            fcs_array_device = self._prepare_gpu_array(fcs_array) if self.use_gpu else fcs_array
+            _, vectors['time'] = self.time_gate.gate(fcs_array_device, self.time_channel_index)
+            if self._is_gpu_array(vectors['time']):
+                vectors['time'] = self._persist_if_gpu(vectors['time'])
+        print("vectors['time']", vectors['time'])
+        if not self.skip_doublet_removal:
+            fcs_array_device = self._prepare_gpu_array(fcs_array) if self.use_gpu else fcs_array
+            _, vectors['doublet'] = self.doublet_gate.gate(fcs_array_device, marker_names)
+            vectors['doublet'] = self._persist_if_gpu(vectors['doublet'])
+        print("vectors['doublet']", vectors['doublet'])
 
         # Calculate final vector
-        if isinstance(fcs_array, da.Array):
-            vectors['final'] = da.logical_and.reduce([
-                vectors['lod'],
-                vectors['debris'],
-                vectors['time'],
-                vectors['doublet']
-            ]).persist()
+        if self._is_gpu_array(fcs_array):
+            # Perform logical AND reduction explicitly
+            final_vector = vectors['lod']
+            for key in ['debris', 'time', 'doublet']:
+                final_vector = final_vector & vectors[key]
+            vectors['final'] = final_vector
+            vectors['final'] = self._persist_if_gpu(vectors['final'])
         else:
-            vectors['final'] = (vectors['lod'] & vectors['debris'] & 
-                              vectors['time'] & vectors['doublet'])
+            # Perform logical AND reduction explicitly
+            final_vector = vectors['lod']
+            for key in ['debris', 'time', 'doublet']:
+                final_vector = final_vector & vectors[key]
+            vectors['final'] = final_vector
 
-        # Convert results back to numpy if not using GPU
+        # Finalize results
         if not self.use_gpu:
-            filtered_data = self._finalize_array(filtered_data)
             vectors = {k: self._finalize_array(v) for k, v in vectors.items()}
             
-        return filtered_data, vectors
+        return vectors
 
-    def remove_limit_of_detection_events(self, fcs_array: ArrayType, marker_names: list[str]) -> Tuple[ArrayType, ArrayType]:
+    def remove_limit_of_detection_events(self, fcs_array: StaticArrayType, marker_names: list[str]) -> Tuple[StaticArrayType, StaticArrayType]:
         """Remove events at the limit of detection."""
         try:
             fsca_column = self._get_marker_index(marker_names, 'fsca')
         except ValueError:
             warnings.warn("No FSC-A parameter found. Skipping limit of detection removal.")
-            if isinstance(fcs_array, da.Array):
-                return fcs_array, da.ones(fcs_array.shape[0], chunks=fcs_array.chunks[0],
+            if HAS_GPU and isinstance(fcs_array, ArrayType):
+                return fcs_array, DEFAULT_ARRAY_MODULE.ones(fcs_array.shape[0], chunks=fcs_array.chunks[0],
                                         dtype=cp.int32 if self.use_gpu else np.int32)
             return fcs_array, np.ones(fcs_array.shape[0], dtype=np.int32)
 
-        if isinstance(fcs_array, da.Array):
-            fsca_max = da.max(fcs_array[:, fsca_column]).compute()
-            max_events = da.sum(fcs_array[:, fsca_column] == fsca_max).compute()
+        if HAS_GPU and isinstance(fcs_array, ArrayType):
+            fsca_max = DEFAULT_ARRAY_MODULE.max(fcs_array[:, fsca_column]).compute()
+            max_events = DEFAULT_ARRAY_MODULE.sum(fcs_array[:, fsca_column] == fsca_max).compute()
             total_events = fcs_array.shape[0]
         else:
             fsca_max = np.max(fcs_array[:, fsca_column])
@@ -270,7 +243,7 @@ class FlowMOP:
             total_events = fcs_array.shape[0]
 
         if max_events / total_events > 0.01:
-            if isinstance(fcs_array, da.Array):
+            if HAS_GPU and isinstance(fcs_array, ArrayType):
                 lod_vector = (fcs_array[:, fsca_column] < fsca_max).astype(cp.int32 if self.use_gpu else np.int32).persist()
                 filtered_array = fcs_array[lod_vector].persist()
             else:
@@ -278,14 +251,13 @@ class FlowMOP:
                 filtered_array = fcs_array[lod_vector == 1]
             print(f"Removed {max_events} events ({max_events/total_events:.2%}) at the limit of detection.")
         else:
-            if isinstance(fcs_array, da.Array):
-                lod_vector = da.ones(total_events, chunks=fcs_array.chunks[0],
+            if HAS_GPU and isinstance(fcs_array, ArrayType):
+                lod_vector = DEFAULT_ARRAY_MODULE.ones(total_events, chunks=fcs_array.chunks[0],
                                    dtype=cp.int32 if self.use_gpu else np.int32)
             else:
                 lod_vector = np.ones(total_events, dtype=np.int32)
             filtered_array = fcs_array
             print("Threshold events below limit of 1%. Retaining events.")
-
         return filtered_array, lod_vector
 
     @staticmethod
@@ -303,8 +275,9 @@ class FlowMOP:
         import re
         return re.sub(r'[^a-zA-Z0-9]', '', name).lower()
 
-    def export_to_csv(self, output_file: str, fcs_array: ArrayType, 
-                     marker_names: list[str], vectors: Dict[str, ArrayType]) -> None:
+    def export_to_csv(self, output_file: str, fcs_array: StaticArrayType, 
+                     marker_names: list[str], vectors: Dict[str, StaticArrayType]) -> None:
+        import pandas as pd
         """Export the processed data and filter vectors to CSV."""
         # Convert DASK/GPU arrays to numpy before creating DataFrame
         if isinstance(fcs_array, da.Array):
@@ -319,8 +292,8 @@ class FlowMOP:
         df.to_csv(output_file, index=False)
         print(f"Data exported to {output_file}")
 
-    def process_and_export(self, marker_names: list[str], fcs_array: ArrayType, 
-                          output_file: str) -> Tuple[ArrayType, Dict[str, ArrayType]]:
+    def process_and_export(self, marker_names: list[str], fcs_array: StaticArrayType, 
+                          output_file: str) -> Tuple[StaticArrayType, Dict[str, StaticArrayType]]:
         """Process the data and export results to CSV."""
         results = self.process_fcs_data(marker_names, fcs_array)
         self.export_to_csv(output_file, fcs_array, marker_names, results[1])
