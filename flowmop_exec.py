@@ -34,7 +34,7 @@ def process_fcs_file(fcs_path: str, use_gpu: bool = False, output_dir: str = Non
         use_gpu=use_gpu,
         time_channel_index=time_channel_index,
         remove_zeros=True,
-        min_cells=600,
+        min_cells=300,
         max_bins=500,
         step=200,
         MAD=6

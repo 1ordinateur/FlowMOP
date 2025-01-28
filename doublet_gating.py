@@ -291,7 +291,7 @@ class InflectionDoubletGate(DoubletGateStrategy):
         self._debug_info['thresholds'] = {'fsc': fsc_threshold}
         
         # Plot the ratio histograms with derivatives
-        self.plot_ratio_histograms(fsc_ratio, ssc_ratio, fsc_threshold, fsc_threshold)
+        # self.plot_ratio_histograms(fsc_ratio, ssc_ratio, fsc_threshold, fsc_threshold)
         
         return filtered_data, doublet_vector
 
@@ -323,19 +323,19 @@ class InflectionDoubletGate(DoubletGateStrategy):
             
         smoothed_hist, bin_edges, peak_indices, peak_densities = hist_result
         
-        # Plot the histogram
-        import matplotlib.pyplot as plt
-        plt.figure(figsize=(10, 6))
-        plt.hist(data, bins=bin_edges, alpha=0.5, density=True, label='Raw Data')
-        plt.plot((bin_edges[:-1] + bin_edges[1:]) / 2, smoothed_hist, 'r-', label='Smoothed')
-        if len(peak_indices) > 0:
-            print("Peaks: ", peak_indices)
-            plt.plot(bin_edges[peak_indices], smoothed_hist[peak_indices], 'go', label='Peaks')
-        plt.xlabel('Ratio')
-        plt.ylabel('Density')
-        plt.title('Ratio Distribution')
-        plt.legend()
-        plt.show()
+        # # Plot the histogram
+        # import matplotlib.pyplot as plt
+        # plt.figure(figsize=(10, 6))
+        # plt.hist(data, bins=bin_edges, alpha=0.5, density=True, label='Raw Data')
+        # plt.plot((bin_edges[:-1] + bin_edges[1:]) / 2, smoothed_hist, 'r-', label='Smoothed')
+        # if len(peak_indices) > 0:
+        #     print("Peaks: ", peak_indices)
+        #     plt.plot(bin_edges[peak_indices], smoothed_hist[peak_indices], 'go', label='Peaks')
+        # plt.xlabel('Ratio')
+        # plt.ylabel('Density')
+        # plt.title('Ratio Distribution')
+        # plt.legend()
+        # plt.show()
         
         return smoothed_hist, bin_edges, peak_indices
 

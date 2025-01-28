@@ -47,7 +47,7 @@ class FlowMOP:
                  mad=5,
                  min_peaks=2,
                  max_peaks=5,
-                 smoothing_window=3,
+                 smoothing_window=2,
                  percentage_cells_present=3,
                  time_channel_index=None,
                  doublet_method: Literal['mad', 'inflection'] = 'inflection',
@@ -92,7 +92,8 @@ class FlowMOP:
             'step': step,
             'mad_threshold': MAD,
             'peak_removal': 1/3,
-            'min_nr_bins_peakdetection': 5
+            'min_nr_bins_peakdetection': 5,
+            'histogram_smoothing': smoothing_window*2
         }
         
         debris_params = {
@@ -186,7 +187,7 @@ class FlowMOP:
         # Apply gating strategies
         if self.time_channel_index is not None:
             fcs_array_device = self._prepare_gpu_array(fcs_array) if self.use_gpu else fcs_array
-            _, vectors['time'] = self.time_gate.gate(fcs_array_device, self.time_channel_index)
+            _, vectors['time'] = self.time_gate.gate(fcs_array_device, self.time_channel_index, marker_names)
             if self._is_gpu_array(vectors['time']):
                 vectors['time'] = self._persist_if_gpu(vectors['time'])
         print("vectors['time']", vectors['time'])

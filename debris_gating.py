@@ -10,77 +10,6 @@ from typing import List, Tuple, Optional, NamedTuple
 import matplotlib.pyplot as plt
 from flowmop_utils import Peak, process_histogram, standardize_marker_name, is_excluded_marker, find_left_minimum
 
-def plot_debris_gating_results(data: np.ndarray, fsc_column: int, threshold: float, 
-                             positive_mask: Optional[np.ndarray] = None,
-                             smoothing_window: int = 3, num_bins: int = 100):
-    """
-    Plot debris gating results showing original and filtered FSC distributions.
-    
-    Args:
-        data: Flow cytometry data array
-        fsc_column: Index of FSC-A column
-        threshold: FSC threshold value
-        positive_mask: Optional mask for positive population
-        smoothing_window: Window size for smoothing
-        num_bins: Number of bins for histogram
-    """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
-    
-    # Plot 1: All cells FSC distribution
-    result = process_histogram(data[:, fsc_column], smoothing_window, num_bins)
-    if result is not None:
-        hist, bin_edges, peak_indices, _ = result
-        
-        # Plot raw histogram
-        ax1.hist(data[:, fsc_column], bins=num_bins, density=True, alpha=0.5, label='Raw Data')
-        
-        # Plot smoothed histogram and peaks
-        ax1.plot(bin_edges[:-1], hist, 'b-', label='Smoothed', alpha=0.7)
-        peak_x = bin_edges[peak_indices]
-        peak_y = hist[peak_indices]
-        ax1.plot(peak_x, peak_y, 'ro', label='Peaks')
-        
-        # Add vertical lines for peaks
-        for x in peak_x:
-            ax1.axvline(x=x, color='gray', linestyle='--', alpha=0.3)
-            
-        ax1.set_title('FSC Distribution - All Cells')
-        ax1.set_xlabel('FSC-A')
-        ax1.set_ylabel('Density')
-        ax1.legend()
-    
-    # Plot 2: Positive population FSC distribution
-    if positive_mask is not None:
-        positive_fsc = data[positive_mask, fsc_column]
-        result = process_histogram(positive_fsc, smoothing_window, num_bins)
-        if result is not None:
-            hist, bin_edges, peak_indices, _ = result
-            
-            # Plot raw histogram
-            ax2.hist(positive_fsc, bins=num_bins, density=True, alpha=0.5, label='Raw Data')
-            
-            # Plot smoothed histogram and peaks
-            ax2.plot(bin_edges[:-1], hist, 'b-', label='Smoothed', alpha=0.7)
-            peak_x = bin_edges[peak_indices]
-            peak_y = hist[peak_indices]
-            ax2.plot(peak_x, peak_y, 'ro', label='Peaks')
-            
-            # Add vertical lines for peaks
-            for x in peak_x:
-                ax2.axvline(x=x, color='gray', linestyle='--', alpha=0.3)
-            
-            # Add threshold line
-            ax2.axvline(x=threshold, color='g', linestyle='-', label='Threshold')
-            
-            ax2.set_title('FSC Distribution - Positive Population')
-            ax2.set_xlabel('FSC-A')
-            ax2.set_ylabel('Density')
-            ax2.legend()
-    
-    plt.tight_layout()
-    plt.show()
-    plt.close()
-
 class DebrisGateStrategy(ABC):
     @abstractmethod
     def gate(self, data: np.ndarray, marker_names: list[str]) -> tuple[np.ndarray, float, np.ndarray]:
@@ -125,22 +54,14 @@ class FSCDebrisGate(DebrisGateStrategy):
         fsc_column = self._get_fsc_column(marker_names)
         # Get FSC thresholds from valid peaks
         fsc_thresholds = self._get_fsc_thresholds(data, valid_peaks_mask, peaks_list, positive_masks, fsc_column)
-        print("fsc_thresholds: ", fsc_thresholds)
 
         if not fsc_thresholds:
             return data, None, np.ones(data.shape[0], dtype=int)
 
         # Calculate final threshold and apply gating
         fsc_gate_threshold = np.nanmedian(fsc_thresholds)
-        print("FSC gate threshold: ", fsc_gate_threshold)
         debris_vector = (data[:, fsc_column] >= fsc_gate_threshold).astype(int)
         filtered_data = data[debris_vector == 1]
-
-        # # Plot results for visualization
-        # for i, (is_valid, peaks, positive_mask) in enumerate(zip(valid_peaks_mask, peaks_list, positive_masks)):
-        #     if is_valid and len(peaks) >= 2 and positive_mask is not None:
-        #         plot_debris_gating_results(data, fsc_column, fsc_gate_threshold, positive_mask, 
-        #                                  self.smoothing_window, self.num_bins)
 
         return filtered_data, fsc_gate_threshold, debris_vector
 
@@ -180,9 +101,31 @@ class FSCDebrisGate(DebrisGateStrategy):
             raise ValueError("FSC-A parameter not found in marker names.")
 
     def _has_low_peak(self, bin_edges: np.ndarray, peak_indices: np.ndarray, 
-                     lowest_reference_pos: float, tolerance: float = 1.15) -> bool:
-        """Check if any peaks are near or below the reference lowest peak."""
-        return any(bin_edges[idx] <= lowest_reference_pos * tolerance for idx in peak_indices)
+                     lowest_reference_pos: float, base_tolerance: float = 1.3) -> bool:
+        """
+        Check if any peaks are near or below the reference lowest peak.
+        The tolerance is dynamically adjusted based on where the lowest reference peak sits in the overall range.
+        If the reference peak is very low in the range, we use a higher tolerance.
+        
+        Args:
+            bin_edges: Bin edges from histogram
+            peak_indices: Indices of detected peaks
+            lowest_reference_pos: Position of lowest peak in reference distribution
+            base_tolerance: Base tolerance multiplier (default 1.3)
+            
+        Returns:
+            bool: Whether any peaks are below the adjusted threshold
+        """
+        # Calculate the relative position of the lowest reference peak in the overall range
+        total_range = bin_edges[-1] - bin_edges[0]
+        relative_pos = (lowest_reference_pos - bin_edges[0]) / total_range
+        
+        # Adjust tolerance - higher tolerance when reference peak is lower in the range
+        # Using an inverse relationship: tolerance increases as relative_pos decreases
+        # Adding 1 to ensure tolerance is always at least base_tolerance
+        dynamic_tolerance = base_tolerance * (1 + (1 - relative_pos))
+        
+        return any(bin_edges[idx] <= lowest_reference_pos * dynamic_tolerance for idx in peak_indices)
 
     def _get_left_boundary_threshold(self, hist: np.ndarray, bin_edges: np.ndarray, 
                                    peak_indices: np.ndarray, smoothing_window: int) -> float:
@@ -197,23 +140,26 @@ class FSCDebrisGate(DebrisGateStrategy):
         """Get threshold using max peak logic."""
         max_peak_idx = np.argmax(peak_densities)
         
-        # If biggest peak is first peak (debris peak), find valley between first and second peaks
-        if max_peak_idx == 0 and len(peak_indices) > 1:
-            left_min_idx = find_left_minimum(thresholded_hist, peak_indices[1], smoothing_window)
-            return bin_edges[left_min_idx]
-            
-        # If biggest peak is second peak
-        if max_peak_idx == 1:
-            left_min_idx = find_left_minimum(thresholded_hist, peak_indices[max_peak_idx], smoothing_window)
-            return bin_edges[left_min_idx]
-        
+        # If biggest peak is first or second peak, find middle minimum between first and second peaks
+        if (max_peak_idx == 0 and len(peak_indices) > 1) or max_peak_idx == 1:
+            # Get indices between first and second peak
+            start_idx = peak_indices[0]
+            end_idx = peak_indices[1]
+            # Find all minimum points between the peaks
+            min_value = np.min(thresholded_hist[start_idx:end_idx])
+            min_indices = np.where(thresholded_hist[start_idx:end_idx] == min_value)[0]
+            # Take the middle minimum point
+            middle_min_idx = start_idx + min_indices[len(min_indices)//2]
+            return bin_edges[middle_min_idx]
         # Get all peak positions for comparison
         all_peak_positions = bin_edges[peak_indices]
         
-        # Search for appropriate minimum before max peak
-        # For each potential valley, check if it's smaller than ALL peaks
+        # Search for appropriate minimum before max peak if neither of above conditions are met
         for i in range(max_peak_idx - 1, -1, -1):
             left_min_idx = find_left_minimum(thresholded_hist, peak_indices[i], smoothing_window)
+            # If we get to a valley before the first peak, use midpoint between first and second peaks
+            if left_min_idx < peak_indices[0]:
+                return (bin_edges[peak_indices[0]] + bin_edges[peak_indices[1]]) / 2
             valley_position = bin_edges[left_min_idx]
             # Check if this valley is smaller than ALL peaks
             if all(valley_position < peak_pos for peak_pos in all_peak_positions):
@@ -227,8 +173,6 @@ class FSCDebrisGate(DebrisGateStrategy):
         # Get the lowest FSC peak position from reference
         lowest_reference_peak_pos = reference_peaks[0][1]
         smoothed_hist, pos_bin_edges, pos_peak_indices, peak_densities = process_histogram_result
-
-        print("pos_peak_indices: ", pos_peak_indices)
         
         # Check if we have any peaks near or below the reference lowest peak
         if not self._has_low_peak(pos_bin_edges, pos_peak_indices, lowest_reference_peak_pos):
@@ -247,7 +191,7 @@ class FSCDebrisGate(DebrisGateStrategy):
         if result is None:
             return []
         
-        _, bin_edges, ref_peak_indices, _ = result
+        smoothed_hist, bin_edges, ref_peak_indices, _ = result
         all_fsc_peaks = [(idx, bin_edges[idx]) for idx in ref_peak_indices]
         all_fsc_peaks = sorted(all_fsc_peaks, key=lambda x: x[1])
         
@@ -264,11 +208,41 @@ class FSCDebrisGate(DebrisGateStrategy):
                 if pos_result is not None:
                     # Find FSC threshold using positive cells and reference peaks
                     threshold = self._find_fsc_threshold(pos_result, all_fsc_peaks, self.smoothing_window)
+                    
                     if threshold is not None:
                         fsc_thresholds.append(threshold)
+                        
+                        # Optional plotting
+                        if False:
+                            # Create a figure with two subplots side by side
+                            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+                            
+                            # Plot 1: Full FSC Distribution
+                            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                            ax1.plot(bin_centers, smoothed_hist, 'b-', label='All Cells')
+                            ax1.plot(bin_centers[ref_peak_indices], smoothed_hist[ref_peak_indices], 'ro', label='Peaks')
+                            ax1.set_xlabel('FSC-A')
+                            ax1.set_ylabel('Density')
+                            ax1.set_title('Full FSC Distribution')
+                            ax1.axvline(x=threshold, color='g', linestyle='--', label='Threshold')
+                            ax1.legend()
+                            
+                            # Plot 2: Positive Population
+                            pos_hist, pos_bin_edges, pos_peak_indices, _ = pos_result
+                            pos_bin_centers = (pos_bin_edges[:-1] + pos_bin_edges[1:]) / 2
+                            ax2.plot(pos_bin_centers, pos_hist, 'b-', label='Positive Cells')
+                            ax2.plot(pos_bin_centers[pos_peak_indices], pos_hist[pos_peak_indices], 'ro', label='Peaks')
+                            ax2.axvline(x=threshold, color='g', linestyle='--', label='Threshold')
+                            ax2.set_xlabel('FSC-A')
+                            ax2.set_ylabel('Density')
+                            ax2.set_title('Positive Population FSC Distribution')
+                            ax2.legend()
+                            
+                            plt.suptitle(f'FSC Distribution Analysis - Feature {i}')
+                            plt.tight_layout()
+                            plt.show()
                     else:
                         fsc_thresholds.append(np.nan)
-                
         return fsc_thresholds
 
 def detect_fluoropeaks(data: np.ndarray, marker_names: List[str], min_peaks: int = 2, max_peaks: int = 5, 

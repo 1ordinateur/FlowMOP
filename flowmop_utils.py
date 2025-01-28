@@ -36,26 +36,28 @@ def analyze_histogram(data: np.ndarray, num_bins: int, smoothing_window: int, fi
 
     # Zero out low-density bins (less than 1% of max density)
     if filter_extremes:
-        density_threshold = np.max(hist) * 0.02
+        density_threshold = np.max(hist) * 0.01
         hist[hist < density_threshold] = 0
-    
+        
     # Zero out extremes
     bottom_bins = int(num_bins * 0.02)
     top_bins = int(num_bins * 0.98)
     hist[:bottom_bins] = hist[top_bins:] = 0
-    
+        
     # Zero out bins below average density threshold
-    avg_density_threshold = np.sum(hist) / len(hist) * 0.5
-    hist[hist < avg_density_threshold] = 0
+    if filter_extremes:
+        avg_density_threshold = np.sum(hist) / len(hist) * 0.25
+        hist[hist < avg_density_threshold] = 0
     
     # Smooth histogram
     smoothed_hist = np.convolve(hist, np.ones(smoothing_window) / smoothing_window, mode='same')
+
     return HistogramAnalysis(hist=hist, bin_edges=bin_edges, smoothed_hist=smoothed_hist)
 
 def find_peaks(hist: np.ndarray, smoothing_window: int) -> np.ndarray:
     """
-    Find peaks in histogram, ensuring they are separated by at least the smoothing window.
-    Also plots the histogram and detected peaks for visualization.
+    Find peaks in histogram, ensuring they are separated by at least the smoothing window
+    and have sufficient prominence relative to surrounding minima.
     
     Args:
         hist: Input histogram
@@ -66,7 +68,7 @@ def find_peaks(hist: np.ndarray, smoothing_window: int) -> np.ndarray:
     """
     # Find points that are higher than their immediate neighbors
     maxima = (hist >= np.roll(hist, 1)) & (hist >= np.roll(hist, -1))
-    maxima[:smoothing_window] = maxima[-smoothing_window:] = False
+    # maxima[:smoothing_window] = maxima[-smoothing_window:] = False
     # Get initial peak candidates
     peak_candidates = np.where(maxima)[0]
     if len(peak_candidates) == 0:
@@ -84,7 +86,40 @@ def find_peaks(hist: np.ndarray, smoothing_window: int) -> np.ndarray:
         if window_max_idx == peak_idx:
             valid_peaks.append(peak_idx)
     
-    return valid_peaks
+    # If we have more than 2 peaks, check prominence
+    if len(valid_peaks) > 2:
+        prominent_peaks = []
+        for i, peak_idx in enumerate(valid_peaks):
+            peak_height = hist[peak_idx]
+            
+            # Find minima between this peak and adjacent peaks
+            min_heights = []
+            
+            # Check left minimum
+            if i > 0:
+                left_peak_idx = valid_peaks[i-1]
+                left_min = np.min(hist[left_peak_idx:peak_idx])
+                min_heights.append(left_min)
+            
+            # Check right minimum
+            if i < len(valid_peaks) - 1:
+                right_peak_idx = valid_peaks[i+1]
+                right_min = np.min(hist[peak_idx:right_peak_idx])
+                min_heights.append(right_min)
+            
+            # If we found any minima, check prominence
+            if min_heights:
+                highest_min = max(min_heights)
+                prominence = (peak_height - highest_min) / peak_height
+                if prominence >= 0.1:  # 10% prominence threshold
+                    prominent_peaks.append(peak_idx)
+            else:
+                # Keep edge peaks by default
+                prominent_peaks.append(peak_idx)
+        
+        return np.array(prominent_peaks)
+    
+    return np.array(valid_peaks)
 
 def calculate_peak_densities(hist: np.ndarray, peak_indices: np.ndarray, 
                            smoothing_window: int) -> List[float]:
@@ -145,7 +180,7 @@ def process_histogram(feature: np.ndarray, smoothing_window: int, num_bins: int 
     if hist_analysis.smoothed_hist is None:
         return None
 
-    peak_indices = find_peaks(hist_analysis.smoothed_hist, smoothing_window)
+    peak_indices = find_peaks(hist_analysis.smoothed_hist, smoothing_window)    
     # Always calculate peak densities, even with one peak
     peak_densities = calculate_peak_densities(hist_analysis.smoothed_hist, peak_indices, smoothing_window)
     return hist_analysis.smoothed_hist, hist_analysis.bin_edges, peak_indices, peak_densities

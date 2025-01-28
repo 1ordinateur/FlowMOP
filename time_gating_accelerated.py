@@ -29,13 +29,14 @@ class DaskGPUMADTimeGate(TimeGateStrategy):
         self.min_nr_bins_peakdetection = min_nr_bins_peakdetection
         self._debug_info = {}
 
-    def gate(self, data: da.Array, time_channel_index: int) -> Tuple[da.Array, da.Array]:
+    def gate(self, data: da.Array, time_channel_index: int, marker_names: list) -> Tuple[da.Array, da.Array]:
         """
         Apply MAD-based time gating using GPU-accelerated DASK arrays.
         
         Args:
             data: Flow cytometry data array (DASK array)
             time_channel_index: Index of the time channel
+            marker_names: List of marker names corresponding to each channel
             
         Returns:
             tuple: (filtered_data, time_gate_vector)
@@ -46,15 +47,22 @@ class DaskGPUMADTimeGate(TimeGateStrategy):
         # Create time bins with overlap
         breaks = self._make_breaks(events_per_bin, data.shape[0])
         
-        # Detect peaks in time channel
-        peaks = self._determine_peaks_all_channels(data, [time_channel_index], breaks['breaks'])
+        # Get all fluorescence channels (exclude time, FSC, SSC channels)
+        fluoro_channels = [i for i, name in enumerate(marker_names) 
+                         if i != time_channel_index and 
+                         not any(x.lower() in name.lower() for x in ['fsc', 'ssc', 'time'])]
+        
+        # Detect peaks in all fluorescence channels
+        peaks = self._determine_peaks_all_channels(data, fluoro_channels, breaks['breaks'])
         
         # Apply MAD-based outlier detection
-        mad_results = self._mad_excluder_gpu(peaks[time_channel_index], self.mad_threshold, 
-                                           breaks['breaks'], data.shape[0])
+        time_gate_vector = da.ones(data.shape[0], dtype=bool)
+        for channel_peaks in peaks.values():
+            mad_results = self._mad_excluder_gpu(channel_peaks, self.mad_threshold, 
+                                               breaks['breaks'], data.shape[0])
+            time_gate_vector &= mad_results['cells']
         
         # Create time gate vector and filter data
-        time_gate_vector = mad_results['cells']
         filtered_data = data[time_gate_vector]
         
         return filtered_data, time_gate_vector
