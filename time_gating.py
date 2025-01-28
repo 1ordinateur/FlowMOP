@@ -44,26 +44,33 @@ class MADTimeGate(TimeGateStrategy):
         """
         # Calculate optimal number of events per bin
         events_per_bin = self._find_events_per_bin(data)
-        
-        # Create time bins with overlap
         breaks = self._make_breaks(events_per_bin, data.shape[0])
         print(f"Number of time bins: {len(breaks)}")
         
-        # Get all fluorescence channels (exclude time, FSC, SSC channels)
         fluoro_channels = [i for i, name in enumerate(marker_names) 
                          if i != time_channel_index and 
                          not any(x.lower() in name.lower() for x in ['fsc', 'ssc', 'time'])]
         
-        # Detect positive peaks in all fluorescence channels
         peaks = self._determine_peaks_all_channels(data, fluoro_channels, breaks['breaks'], marker_names)
         
-        # Combine MAD results from all channels
-        time_gate_vector = np.ones(data.shape[0], dtype=bool)
-        for channel_peaks in peaks.values():
-            mad_results = self._mad_excluder(channel_peaks, self.mad_threshold, breaks['breaks'], data.shape[0])
-            time_gate_vector &= mad_results['cells']
+        # Initialize array to count how many channels reject each cell
+        rejection_count = np.zeros(data.shape[0], dtype=int)
         
-        # Filter data using combined gate vector
+        # Process each channel with both short and long-term filtering
+        for channel_peaks in peaks.values():
+            # Short-term filtering (s=0.1)
+            short_results = self._mad_excluder(channel_peaks, self.mad_threshold, breaks['breaks'], 
+                                             data.shape[0], smoothing_factor=0.1)
+            # Long-term filtering (s=1.0)
+            long_results = self._mad_excluder(channel_peaks, self.mad_threshold, breaks['breaks'], 
+                                            data.shape[0], smoothing_factor=1.0)
+            
+            # Increment count for cells that fail either filter
+            rejected_cells = ~(short_results['cells'] & long_results['cells'])
+            rejection_count[rejected_cells] += 1
+        
+        # Create final gate vector - reject only cells that were rejected by 2 or more channels
+        time_gate_vector = rejection_count < 2
         filtered_data = data[time_gate_vector]
         
         return filtered_data, time_gate_vector
@@ -183,12 +190,24 @@ class MADTimeGate(TimeGateStrategy):
         # Find threshold for positive peak across all data
         positive_threshold = np.max(processed_data) * self.peak_removal
         
-        # Process each time break
-        channel_breaks = {i: processed_data[break_indices] for i, break_indices in enumerate(breaks)}
-        thresholds = {break_: self._timegate_peak_detection(break_data, 
-                                                          smoothing=self.histogram_smoothing,
-                                                          max_peak=positive_threshold) 
-                     for break_, break_data in channel_breaks.items()}
+        # Process each time break - ensure indices are within bounds
+        channel_breaks = {}
+        for i, break_indices in enumerate(breaks):
+            # Ensure indices are within bounds
+            valid_indices = break_indices[break_indices < len(processed_data)]
+            if len(valid_indices) > 0:  # Only process if we have valid indices
+                channel_breaks[i] = processed_data[valid_indices]
+        
+        thresholds = {}
+        for break_, break_data in channel_breaks.items():
+            try:
+                thresh = self._timegate_peak_detection(break_data, 
+                                                     smoothing=self.histogram_smoothing,
+                                                     max_peak=positive_threshold)
+                thresholds[break_] = thresh
+            except Exception as e:
+                print(f"Warning: Error processing break {break_}: {str(e)}")
+                thresholds[break_] = np.array([])
         
         # Create array of thresholds and their time bins
         threshold_frame = np.array([(break_, thresh) for break_, thresh_list in thresholds.items() 
@@ -240,12 +259,10 @@ class MADTimeGate(TimeGateStrategy):
         
         # Filter out values in the top and bottom 1% of the range
         bin_data = bin_data[(bin_data >= bottom_cutoff) & (bin_data <= top_cutoff)]
-        print(f"After range filtering: {np.min(bin_data):.3f} to {np.max(bin_data):.3f}")
         
         # Apply quantile filtering
         q05, q95 = np.quantile(bin_data, [0.001, 0.999])
         bin_data = bin_data[(bin_data >= q05) & (bin_data <= q95)]
-        print(f"After quantile filtering: {np.min(bin_data):.3f} to {np.max(bin_data):.3f}")
         
         if len(bin_data) < 3:
             return np.array([])
@@ -289,47 +306,6 @@ class MADTimeGate(TimeGateStrategy):
             else:
                 # Fallback to lowest point if no peaks above threshold
                 threshold_positive_index = np.array([lowest_point_idx])
-        # Plot histogram and threshold and save to file
-        plt.figure(figsize=(10, 6))
-        
-        # Plot raw data distribution in background
-        plt.hist(raw_data, bins=100, density=True, alpha=0.2, color='red', label='Raw data')
-        
-        # Plot filtered data histogram
-        plt.hist(bin_data, bins=100, density=True, alpha=0.5, color='gray', label='Filtered data')
-        plt.plot(bin_centers, smoothed_hist, 'b-', label='Smoothed histogram')
-        
-        # Plot both thresholds if we have multiple peaks
-        if len(peak_indices) > 1:
-            # Plot the initial lowest point threshold
-            lowest_point_threshold = bin_centers[lowest_point_idx]
-            plt.axvline(x=lowest_point_threshold, color='orange', linestyle='--',
-                       label=f'Initial valley threshold ({lowest_point_threshold:.2f})')
-            
-        # Plot the final threshold
-        if len(threshold_positive_index) > 0:
-            threshold_value = bin_centers[threshold_positive_index[0]]
-            plt.axvline(x=threshold_value, color='r', linestyle='--',
-                       label=f'Final threshold ({threshold_value:.2f})')
-            
-        plt.plot(bin_centers[peak_indices], smoothed_hist[peak_indices],
-                'go', label='Detected peaks')
-        plt.xlabel('Value')
-        plt.ylabel('Density')
-        plt.title('Time Gate Peak Detection')
-        plt.legend()
-        
-        # Create plots directory in working directory if it doesn't exist
-        import os
-        from pathlib import Path
-        plots_dir = Path('./plots')
-        plots_dir.mkdir(exist_ok=True)
-        
-        # Save plot with incrementing counter to avoid overwrites
-        self.plot_counter += 1
-        plt.savefig(plots_dir / f'time_gate_peak_detection_{self.plot_counter}.png')
-        plt.close()
-
         # The prominence check is now handled in flowmop_utils.find_peaks
         return bin_centers[threshold_positive_index]
 
@@ -368,42 +344,66 @@ class MADTimeGate(TimeGateStrategy):
         
         return updated_peak_frame
 
-    def _mad_excluder(self, peaks, mad_threshold, breaks, nr_cells):
-        """Apply MAD-based outlier detection."""
+    def _mad_excluder(self, peaks, mad_threshold, breaks, nr_cells, smoothing_factor=0.1):
+        """Apply MAD-based outlier detection with configurable smoothing."""
         peak_values = peaks['Peak']
         
-        # Commented out spline smoothing
-        # spline = UnivariateSpline(np.arange(len(peak_values)), peak_values, s=0.2 * len(peak_values))
-        # kernel_y = spline(np.arange(len(peak_values)))
+        # First normalize to mean=1
+        peak_values = peak_values / np.mean(peak_values)
         
-        median_peak = np.median(peak_values)
-        mad_peak = np.mean(np.abs(peak_values - median_peak))
+        # Then scale to target standard deviation of 0.1
+        current_std = np.std(peak_values)
+        target_std = 0.1
+        peak_values = peak_values * (target_std / current_std)
+        
+        # Shift values so median is 1
+        current_median = np.median(peak_values)
+        peak_values = peak_values + (1 - current_median)
+        
+        # Scale smoothing factor based on number of bins
+        n_bins = len(peak_values)
+        smoothing_factor = smoothing_factor * n_bins / 100  # Base factor scaled by number of bins
+        smoothing_factor = max(0.1, min(2.0, smoothing_factor))  # Clamp between 0.1 and 2.0
+        
+        # Apply spline smoothing with fixed parameter
+        spline = UnivariateSpline(np.arange(len(peak_values)), peak_values, s=smoothing_factor)
+        smoothed_peaks = spline(np.arange(len(peak_values)))
+        
+        # Calculate MAD thresholds on normalized data
+        median_peak = np.median(smoothed_peaks)
+        mad_peak = np.median(np.abs(smoothed_peaks - median_peak))
         
         upper_interval = median_peak + mad_threshold * mad_peak
         lower_interval = median_peak - mad_threshold * mad_peak
-        to_remove_bins = (peak_values > upper_interval) | (peak_values < lower_interval)
+        to_remove_bins = (smoothed_peaks > upper_interval) | (smoothed_peaks < lower_interval)
         
         removed = self._removed_bins(breaks, to_remove_bins, nr_cells)
         contribution_mad = round((len(removed['cell_ids']) / nr_cells) * 100, 2)
+        
         # # Plot MAD thresholds and peaks over time
         # plt.figure(figsize=(10, 6))
         # time_points = np.arange(len(peak_values))
         
-        # # Plot original peaks and removed peaks
+        # # Plot original peaks and removed peaks (normalized)
         # plt.scatter(time_points[~to_remove_bins], peak_values[~to_remove_bins], alpha=0.5, label='Valid Peaks')
         # plt.scatter(time_points[to_remove_bins], peak_values[to_remove_bins], alpha=0.5, color='red', label='Removed Peaks')
+        
+        # # Plot the smoothing spline
+        # plt.plot(time_points, smoothed_peaks, 'b-', label=f'Smoothing Spline (s={smoothing_factor})', alpha=0.7)
         
         # # Plot MAD thresholds
         # plt.axhline(y=upper_interval, color='g', linestyle='--', label='Upper MAD Threshold')
         # plt.axhline(y=lower_interval, color='g', linestyle='--', label='Lower MAD Threshold')
+        # plt.axhline(y=1.0, color='k', linestyle=':', label='Mean (1.0)', alpha=0.5)
         
         # plt.xlabel('Time Bin')
-        # plt.ylabel('Peak Value')
-        # plt.title('Peak Values with MAD Thresholds')
+        # plt.ylabel('Normalized Peak Value')
+        # plt.title(f'Normalized Peak Values with MAD Thresholds (smoothing={smoothing_factor})')
         # plt.legend()
         # plt.grid(True)
         # plt.tight_layout()
         # plt.show()
+        
         return {
             "cells": removed['cells'],
             "cell_ids": removed['cell_ids'],

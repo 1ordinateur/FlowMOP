@@ -34,7 +34,7 @@ def process_fcs_file(fcs_path: str, use_gpu: bool = False, output_dir: str = Non
         use_gpu=use_gpu,
         time_channel_index=time_channel_index,
         remove_zeros=True,
-        min_cells=300,
+        min_cells=500,
         max_bins=500,
         step=200,
         MAD=6
@@ -48,9 +48,14 @@ def process_fcs_file(fcs_path: str, use_gpu: bool = False, output_dir: str = Non
     vectors = flowmop.process_fcs_data(marker_names, fcs_array)
     print("\nProcessing successful!")
     print("Original events:", len(fcs_array))
+    print("processed events lod:", len(fcs_array[vectors['lod'] == 1]))
     print("processed events debris:", len(fcs_array[vectors['debris'] == 1]))
     print("processed events time:", len(fcs_array[vectors['time'] == 1]))
     print("processed events doublets:", len(fcs_array[vectors['doublet'] == 1]))
+    
+    # Calculate events that pass all filters
+    all_passed = (vectors['lod'] > 0) & (vectors['debris'] > 0) & (vectors['time'] > 0) & (vectors['doublet'] > 0)
+    print(f"Events passing all filters: {len(fcs_array[all_passed])} ({(len(fcs_array[all_passed])/len(fcs_array)*100):.1f}% retained)")
     
     # Export results if output directory specified
     if output_dir:
