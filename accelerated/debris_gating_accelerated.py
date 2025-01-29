@@ -9,16 +9,19 @@ import dask.array as da
 import cupy as cp
 from dataclasses import dataclass
 
-from .debris_gating import DebrisGateStrategy
-from .accelerated.gpu_funcs.debris_gating_accelerated_gpu import analyze_channel, get_fsc_thresholds, ChannelAnalysisResult
+from cpu.debris_gating import DebrisGateStrategy
+from .gpu_funcs.debris_gating_accelerated_gpu import (
+    ChannelAnalysisResult, analyze_channel, get_fsc_thresholds
+)
+from .gpu_funcs.flowmop_utils_accelerated_gpu import is_excluded_marker
 
 @dataclass
 class DebrisGateResult:
     """Results from debris gating operation."""
     filtered_data: da.Array
-    fsc_threshold: Optional[float]
+    fsc_threshold: Optional[cp.float32]
     debris_vector: da.Array
-    channel_results: Dict[str, ChannelAnalysisResult]
+    channel_results: Dict[int, ChannelAnalysisResult]
 
 class DaskGPUFSCDebrisGate(DebrisGateStrategy):
     """FSC-based debris gating implementation using GPU acceleration."""
@@ -26,11 +29,11 @@ class DaskGPUFSCDebrisGate(DebrisGateStrategy):
     def __init__(self, min_peaks: int = 2, max_peaks: int = 5, smoothing_window: int = 3, 
                  percentage_cells_present: float = 5, num_bins: int = 100):
         """Initialize the gating strategy."""
-        self.min_peaks = min_peaks
-        self.max_peaks = max_peaks
-        self.smoothing_window = smoothing_window
-        self.percentage_cells_present = percentage_cells_present
-        self.num_bins = num_bins
+        self.min_peaks = cp.int32(min_peaks)
+        self.max_peaks = cp.int32(max_peaks)
+        self.smoothing_window = cp.int32(smoothing_window)
+        self.percentage_cells_present = cp.float32(percentage_cells_present)
+        self.num_bins = cp.int32(num_bins)
         self._debug_info = {}
 
     def gate(self, data: da.Array, marker_names: List[str]) -> Tuple[da.Array, da.Array]:
@@ -68,9 +71,10 @@ class DaskGPUFSCDebrisGate(DebrisGateStrategy):
                 depth=0,
                 boundary='none',
                 dtype=object
-            )
+            ).compute()
             
-            channel_results[marker] = result
+            if result.is_valid:
+                channel_results[i] = result
 
         # Get FSC thresholds from valid channels
         fsc_thresholds = self._get_fsc_thresholds(data, channel_results, marker_names)
@@ -79,8 +83,10 @@ class DaskGPUFSCDebrisGate(DebrisGateStrategy):
             return data, da.ones(data.shape[0], dtype=cp.int32)
 
         # Calculate final threshold and apply gating
-        fsc_gate_threshold = float(cp.nanmedian(cp.asarray(fsc_thresholds)))
+        fsc_gate_threshold = cp.float32(cp.nanmedian(cp.asarray(fsc_thresholds)))
         fsc_column = self._get_fsc_column(marker_names)
+
+        # Compute the gating vector and filtered data
         debris_vector = (data[:, fsc_column] >= fsc_gate_threshold).astype(cp.int32)
         filtered_data = data[debris_vector]
 
@@ -99,11 +105,11 @@ class DaskGPUFSCDebrisGate(DebrisGateStrategy):
 
         def check_bottom_bin(chunk):
             chunk_gpu = cp.asarray(chunk)
-            fsc_max = float(cp.max(chunk_gpu[:, fsc_a_column]))
-            ssc_max = float(cp.max(chunk_gpu[:, ssc_a_column]))
+            fsc_max = cp.float32(cp.max(chunk_gpu[:, fsc_a_column]))
+            ssc_max = cp.float32(cp.max(chunk_gpu[:, ssc_a_column]))
             
-            fsc_bottom = fsc_max * 0.1
-            ssc_bottom = ssc_max * 0.1
+            fsc_bottom = fsc_max * cp.float32(0.1)
+            ssc_bottom = ssc_max * cp.float32(0.1)
             
             return cp.any(
                 (chunk_gpu[:, fsc_a_column] <= fsc_bottom) & 
@@ -111,12 +117,12 @@ class DaskGPUFSCDebrisGate(DebrisGateStrategy):
             )
 
         # Apply check to each chunk
-        result = da.map_blocks(check_bottom_bin, data, dtype=bool).any().compute()
+        result = da.map_blocks(check_bottom_bin, data, dtype=cp.bool_).any().compute()
         
         if not result:
             warnings.warn("No events found in the bottom 10th bin of FSC-A and SSC-A. Debris removal will be skipped.")
         
-        return result
+        return bool(result)
 
     def _get_fsc_column(self, marker_names: List[str]) -> int:
         """Get the index of the FSC-A column."""
@@ -126,13 +132,13 @@ class DaskGPUFSCDebrisGate(DebrisGateStrategy):
         except ValueError:
             raise ValueError("FSC-A parameter not found in marker names.")
 
-    def _get_fsc_thresholds(self, data: da.Array, channel_results: Dict[str, ChannelAnalysisResult],
-                           marker_names: List[str]) -> List[float]:
+    def _get_fsc_thresholds(self, data: da.Array, channel_results: Dict[int, ChannelAnalysisResult],
+                           marker_names: List[str]) -> List[cp.float32]:
         """Get FSC thresholds for features with valid peaks."""
         fsc_column = self._get_fsc_column(marker_names)
         fsc_data = data[:, fsc_column]
         
-        thresholds = da.ones(data.shape[1], dtype=float)
+        thresholds = []
         for marker, result in channel_results.items():
             if result.is_valid and result.positive_mask is not None:
                 threshold = da.map_overlap(
@@ -142,11 +148,11 @@ class DaskGPUFSCDebrisGate(DebrisGateStrategy):
                     fsc_data, result.positive_mask,
                     depth=0,
                     boundary='none',
-                    dtype=float
-                )
+                    dtype=cp.float32
+                ).compute()
                 
                 if threshold is not None:
-                    thresholds[i] = threshold
+                    thresholds.append(threshold)
 
         return thresholds
 

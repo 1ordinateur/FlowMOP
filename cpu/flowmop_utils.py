@@ -66,59 +66,66 @@ def find_peaks(hist: np.ndarray, smoothing_window: int) -> np.ndarray:
     Returns:
         Array of peak indices
     """
-    # Find points that are higher than their immediate neighbors
+    import time
+    timings = {}
+    
+    # Time initial peak detection
+    t0 = time.perf_counter()
     maxima = (hist >= np.roll(hist, 1)) & (hist >= np.roll(hist, -1))
-    # maxima[:smoothing_window] = maxima[-smoothing_window:] = False
-    # Get initial peak candidates
     peak_candidates = np.where(maxima)[0]
+    t1 = time.perf_counter()
+    timings['initial_peak_detection'] = t1 - t0
+    
     if len(peak_candidates) == 0:
         return peak_candidates
         
-    # Filter peaks to ensure they are the highest point within smoothing_window
+    # Time candidate filtering
+    t0 = time.perf_counter()
     valid_peaks = []
     for peak_idx in peak_candidates:
-        # Define window boundaries
         window_start = max(0, peak_idx - smoothing_window)
         window_end = min(len(hist), peak_idx + smoothing_window + 1)
         
-        # Check if this point is the highest in its window
         window_max_idx = window_start + np.argmax(hist[window_start:window_end])
         if window_max_idx == peak_idx:
             valid_peaks.append(peak_idx)
+    t1 = time.perf_counter()
+    timings['candidate_filtering'] = t1 - t0
     
-    # If we have more than 2 peaks, check prominence
+    # Time prominence filtering
+    t0 = time.perf_counter()
     if len(valid_peaks) > 2:
         prominent_peaks = []
         for i, peak_idx in enumerate(valid_peaks):
             peak_height = hist[peak_idx]
-            
-            # Find minima between this peak and adjacent peaks
             min_heights = []
             
-            # Check left minimum
             if i > 0:
                 left_peak_idx = valid_peaks[i-1]
                 left_min = np.min(hist[left_peak_idx:peak_idx])
                 min_heights.append(left_min)
             
-            # Check right minimum
             if i < len(valid_peaks) - 1:
                 right_peak_idx = valid_peaks[i+1]
                 right_min = np.min(hist[peak_idx:right_peak_idx])
                 min_heights.append(right_min)
             
-            # If we found any minima, check prominence
             if min_heights:
                 highest_min = max(min_heights)
                 prominence = (peak_height - highest_min) / peak_height
-                if prominence >= 0.1:  # 10% prominence threshold
+                if prominence >= 0.1:
                     prominent_peaks.append(peak_idx)
             else:
-                # Keep edge peaks by default
                 prominent_peaks.append(peak_idx)
         
+        t1 = time.perf_counter()
+        timings['prominence_filtering'] = t1 - t0
+        print(f"Peak finding timings: {timings}")
         return np.array(prominent_peaks)
     
+    t1 = time.perf_counter()
+    timings['prominence_filtering'] = t1 - t0
+    print(f"Peak finding timings: {timings}")
     return np.array(valid_peaks)
 
 def calculate_peak_densities(hist: np.ndarray, peak_indices: np.ndarray, 

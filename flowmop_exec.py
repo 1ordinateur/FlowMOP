@@ -3,9 +3,10 @@ import pandas as pd
 import argparse
 from pathlib import Path
 import fcsparser
-from flowmop_new import FlowMOP
+import flowmop_new
+import dask.array as da
 
-def process_fcs_file(fcs_path: str, use_gpu: bool = False, output_dir: str = None) -> None:
+def process_fcs_file(fcs_path: str, use_gpu: bool = True, output_dir: str = None) -> None:
     """
     Process a single FCS file through the FlowMOP pipeline.
     
@@ -30,7 +31,7 @@ def process_fcs_file(fcs_path: str, use_gpu: bool = False, output_dir: str = Non
             break
     
     # Initialize FlowMOP
-    flowmop = FlowMOP(
+    flowmop = flowmop_new.FlowMOP(
         use_gpu=use_gpu,
         time_channel_index=time_channel_index,
         remove_zeros=True,
@@ -39,10 +40,6 @@ def process_fcs_file(fcs_path: str, use_gpu: bool = False, output_dir: str = Non
         step=200,
         MAD=6
     )
-    
-    # Print data info
-    print("Data shape:", fcs_array.shape)
-    print("\nChannel names:", marker_names)
     
     # Process the data
     vectors = flowmop.process_fcs_data(marker_names, fcs_array)

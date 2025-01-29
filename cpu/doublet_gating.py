@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 import warnings
 from scipy import stats
 import matplotlib.pyplot as plt
-from flowmop_utils import process_histogram, find_peaks, find_left_minimum
+from .flowmop_utils import process_histogram, find_peaks, find_left_minimum
 
 class DoubletGateStrategy(ABC):
     @abstractmethod

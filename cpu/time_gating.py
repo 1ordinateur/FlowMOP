@@ -3,12 +3,14 @@ Time gating component for FlowMOP.
 Handles detection and removal of time-based anomalies in flow cytometry data.
 """
 
+import warnings
+from typing import Union, Tuple, List, Dict
 import numpy as np
 import numpy.ma as ma
 from scipy.ndimage import maximum_filter1d
 from scipy.interpolate import UnivariateSpline
 from abc import ABC, abstractmethod
-import flowmop_utils
+from .flowmop_utils import process_histogram, Peak  # Changed to relative import
 import matplotlib.pyplot as plt
 
 class TimeGateStrategy(ABC):
@@ -19,7 +21,7 @@ class TimeGateStrategy(ABC):
 
 class MADTimeGate(TimeGateStrategy):
     def __init__(self, remove_zeros=True, min_cells=150, max_bins=500, step=200, mad_threshold=6,
-                 peak_removal=1/3, min_nr_bins_peakdetection=5, histogram_smoothing=5):
+                 peak_removal=1/3, min_nr_bins_peakdetection=5, histogram_smoothing=5, mad_method='all', mad_smoothing=[0.1, 1.0]):
         self.remove_zeros = remove_zeros
         self.min_cells = min_cells
         self.max_bins = max_bins
@@ -28,6 +30,8 @@ class MADTimeGate(TimeGateStrategy):
         self.peak_removal = peak_removal
         self.min_nr_bins_peakdetection = min_nr_bins_peakdetection
         self.histogram_smoothing = histogram_smoothing
+        self.mad_method = mad_method
+        self.mad_smoothing = mad_smoothing
         self.plot_counter = 0
 
     def gate(self, data: np.ndarray, time_channel_index: int, marker_names: list) -> tuple[np.ndarray, np.ndarray]:
@@ -51,25 +55,33 @@ class MADTimeGate(TimeGateStrategy):
                          if i != time_channel_index and 
                          not any(x.lower() in name.lower() for x in ['fsc', 'ssc', 'time'])]
         
-        peaks = self._determine_peaks_all_channels(data, fluoro_channels, breaks['breaks'], marker_names)
-        
+        thresholds = self._determine_thresholds_all_channels(data, fluoro_channels, breaks['breaks'], marker_names)
         # Initialize array to count how many channels reject each cell
         rejection_count = np.zeros(data.shape[0], dtype=int)
         
-        # Process each channel with both short and long-term filtering
-        for channel_peaks in peaks.values():
-            # Short-term filtering (s=0.1)
-            short_results = self._mad_excluder(channel_peaks, self.mad_threshold, breaks['breaks'], 
-                                             data.shape[0], smoothing_factor=0.1)
-            # Long-term filtering (s=1.0)
-            long_results = self._mad_excluder(channel_peaks, self.mad_threshold, breaks['breaks'], 
-                                            data.shape[0], smoothing_factor=1.0)
+        # Process each channel
+        for channel_thresholds in thresholds.values():
+            if self.mad_method == 'short':
+                # Short-term filtering only (s=0.1)
+                results = self._mad_excluder(channel_thresholds, self.mad_threshold, breaks['breaks'], 
+                                          data.shape[0], smoothing_factor=0.1)
+                rejected_cells = ~results['cells']
+            elif self.mad_method == 'long':
+                # Long-term filtering only (s=1.0)
+                results = self._mad_excluder(channel_thresholds, self.mad_threshold, breaks['breaks'], 
+                                          data.shape[0], smoothing_factor=1.0)
+                rejected_cells = ~results['cells']
+            else:  # 'all' - default
+                # Both short and long-term filtering
+                short_results = self._mad_excluder(channel_thresholds, self.mad_threshold, breaks['breaks'], 
+                                                 data.shape[0], smoothing_factor=0.1)
+                long_results = self._mad_excluder(channel_thresholds, self.mad_threshold, breaks['breaks'], 
+                                                data.shape[0], smoothing_factor=1.0)
+                rejected_cells = ~(short_results['cells'] & long_results['cells'])
             
-            # Increment count for cells that fail either filter
-            rejected_cells = ~(short_results['cells'] & long_results['cells'])
             rejection_count[rejected_cells] += 1
         
-        # Create final gate vector - reject only cells that were rejected by 2 or more channels
+        # Create final gate vector - reject cells that were rejected by 2 or more channels
         time_gate_vector = rejection_count < 2
         filtered_data = data[time_gate_vector]
         
@@ -102,9 +114,9 @@ class MADTimeGate(TimeGateStrategy):
                                         int(np.ceil(events_per_bin / 2)))
         return {'breaks': breaks, 'events_per_bin': events_per_bin}
 
-    def _determine_peaks_all_channels(self, data, channels, breaks, marker_names):
+    def _determine_thresholds_all_channels(self, data, channels, breaks, marker_names):
         """
-        Detect peaks in all channels, analyzing each time bin separately.
+        Detect thresholds in all channels, analyzing each time bin separately.
         
         Args:
             data: Flow cytometry data array
@@ -113,17 +125,17 @@ class MADTimeGate(TimeGateStrategy):
             marker_names: List of marker names for labeling plots
             
         Returns:
-            Dictionary mapping channel indices to peak information
+            Dictionary mapping channel indices to threshold information
         """
-        peak_frames = {}
+        threshold_frames = {}
         for channel in channels:
             channel_data = data[:, channel]
             marker_name = marker_names[channel]
-            result = self._determine_all_peaks(channel_data, breaks, marker_name)
+            result = self._determine_all_thresholds(channel_data, breaks, marker_name)
             if result is not None:
-                peak_frames[channel] = result
+                threshold_frames[channel] = result
         
-        return peak_frames
+        return threshold_frames
 
     def _preprocess_channel_data(self, channel_data):
         """
@@ -159,13 +171,13 @@ class MADTimeGate(TimeGateStrategy):
         
         return processed_data
 
-    def _determine_all_peaks(self, channel_data, breaks, marker_name):
+    def _determine_all_thresholds(self, channel_data, breaks, marker_name):
         """Determine peaks for a single channel."""
         # Preprocess the channel data
         processed_data = self._preprocess_channel_data(channel_data)
         
         # Use processed data for peak detection
-        full_channel_peaks = self._timegate_peak_detection(processed_data, smoothing=self.histogram_smoothing)
+        full_channel_thresholds = self._timegate_threshold_detection(processed_data, smoothing=self.histogram_smoothing)
         
         # # Plot the full channel histogram and peaks
         # result = flowmop_utils.process_histogram(processed_data, smoothing_window=self.histogram_smoothing, num_bins=100, filter_extremes=False)
@@ -184,7 +196,7 @@ class MADTimeGate(TimeGateStrategy):
         #     plt.legend()
         #     plt.show()
         
-        if np.all(np.isnan(full_channel_peaks)):
+        if np.all(np.isnan(full_channel_thresholds)):
             return None
         
         # Find threshold for positive peak across all data
@@ -201,7 +213,7 @@ class MADTimeGate(TimeGateStrategy):
         thresholds = {}
         for break_, break_data in channel_breaks.items():
             try:
-                thresh = self._timegate_peak_detection(break_data, 
+                thresh = self._timegate_threshold_detection(break_data, 
                                                      smoothing=self.histogram_smoothing,
                                                      max_peak=positive_threshold)
                 thresholds[break_] = thresh
@@ -220,28 +232,27 @@ class MADTimeGate(TimeGateStrategy):
                          for break_, thresh_list in thresholds.items()}
 
         # Find representative thresholds across time bins
-        most_occurring_thresholds = self._find_most_occurring_peaks(thresholds)  
+        most_occurring_thresholds = self._find_most_occurring_thresholds(thresholds)  
         if most_occurring_thresholds is None:
             most_occurring_thresholds = np.median(threshold_frame['Threshold'])
 
         # After finding representative thresholds across time bins, we need to update each bin's threshold
         # assignments to match these representative values. This ensures consistent thresholding across
         # the entire time series and reduces the impact of local variations or noise.
-        updated_threshold_frame = self._update_peak_frame(thresholds, most_occurring_thresholds)  # Method name unchanged as it's outside selection
+        updated_threshold_frame = self._update_threshold_frame(thresholds, most_occurring_thresholds)  # Method name unchanged as it's outside selection
         
         return updated_threshold_frame[updated_threshold_frame['Bin'] != -1]
 
-    def _timegate_peak_detection(self, bin_data, smoothing=None, max_peak=None, window_size=2):
+    def _timegate_threshold_detection(self, bin_data, smoothing=None, max_peak=None, window_size=2):
         """
         Detect peaks in time-gated data.
         
-        Ensures peaks are:
+        Ensures thresholds are:
         1. Separated by at least the smoothing window
         2. Above the peak_removal threshold relative to max fluoresent peak
         3. Have at least 10% prominence relative to surrounding minima if >2 peaks
         """
         
-        raw_data = bin_data.copy()
         if self.remove_zeros:
             bin_data = bin_data[bin_data != 0]
         
@@ -267,7 +278,7 @@ class MADTimeGate(TimeGateStrategy):
         if len(bin_data) < 3:
             return np.array([])
             
-        result = flowmop_utils.process_histogram(bin_data, smoothing_window=smoothing, num_bins=100)
+        result = process_histogram(bin_data, smoothing_window=smoothing, num_bins=100)
         
         if result is None:
             return np.array([])
@@ -286,6 +297,7 @@ class MADTimeGate(TimeGateStrategy):
         if len(peak_indices) == 1:
             peak_mask = peak_values > (self.peak_removal * max_peak)
             threshold_positive_index = peak_indices[peak_mask]
+
         # If multiple peaks, find lowest point between first and last peak
         else:
             first_peak_idx = peak_indices[0]
@@ -306,12 +318,12 @@ class MADTimeGate(TimeGateStrategy):
             else:
                 # Fallback to lowest point if no peaks above threshold
                 threshold_positive_index = np.array([lowest_point_idx])
-        # The prominence check is now handled in flowmop_utils.find_peaks
+
         return bin_centers[threshold_positive_index]
 
-    def _find_most_occurring_peaks(self, peaks, tolerance=0.05):
+    def _find_most_occurring_thresholds(self, thresholds, tolerance=0.05):
         """Find the most frequently occurring peaks."""
-        flattened_peaks = [(bin_num, peak) for bin_num, peak_list in peaks.items() 
+        flattened_peaks = [(bin_num, peak) for bin_num, peak_list in thresholds.items() 
                           for peak in peak_list]
         if not flattened_peaks:
             return None
@@ -320,33 +332,34 @@ class MADTimeGate(TimeGateStrategy):
         bin_edges = np.arange(min(peak_values), max(peak_values) + tolerance, tolerance)
         hist, _ = np.histogram(peak_values, bins=bin_edges)
         
-        min_occurrences = (self.min_nr_bins_peakdetection / 100) * len(peaks)
+        min_occurrences = (self.min_nr_bins_peakdetection / 100) * len(thresholds)
         candidate_bins = np.where(hist >= min_occurrences)[0]
         
         if len(candidate_bins) > 0:
-            candidate_peaks = (bin_edges[candidate_bins] + bin_edges[candidate_bins + 1]) / 2
-            return candidate_peaks[np.argmax(hist[candidate_bins])]
+            candidate_thresholds = (bin_edges[candidate_bins] + bin_edges[candidate_bins + 1]) / 2
+            return candidate_thresholds[np.argmax(hist[candidate_bins])]
         return None
 
-    def _update_peak_frame(self, peaks, most_occurring_peaks):
-        """Update peak frame with closest peaks to the most occurring peaks."""
-        updated_peak_frame = np.empty(len(peaks), dtype=[('Bin', int), ('Peak', float)])
-        
-        for i, (break_, peak_list) in enumerate(peaks.items()):
-            if isinstance(break_, int) and break_ < len(updated_peak_frame):
-                if len(peak_list) > 0:
-                    closest_peak_index = np.argmin(np.abs(peak_list - most_occurring_peaks))
-                    updated_peak_frame[i] = (break_, peak_list[closest_peak_index])
+    def _update_threshold_frame(self, thresholds, most_occurring_thresholds):
+        """Update threshold frame with closest thresholds to the most occurring thresholds."""
+        updated_threshold_frame = np.empty(len(thresholds), dtype=[('Bin', int), ('Threshold', float)])
+            
+        for i, (break_, threshold_list) in enumerate(thresholds.items()):
+            if isinstance(break_, int) and break_ < len(updated_threshold_frame):
+                if len(threshold_list) > 0:
+                    closest_threshold_index = np.argmin(np.abs(threshold_list - most_occurring_thresholds))
+                    updated_threshold_frame[i] = (break_, threshold_list[closest_threshold_index])
                 else:
-                    updated_peak_frame[i] = (break_, np.nan)
+                    updated_threshold_frame[i] = (break_, np.nan)
             else:
-                updated_peak_frame[i] = (-1, np.nan)
+                updated_threshold_frame[i] = (-1, np.nan)
         
-        return updated_peak_frame
+        return updated_threshold_frame
 
     def _mad_excluder(self, peaks, mad_threshold, breaks, nr_cells, smoothing_factor=0.1):
         """Apply MAD-based outlier detection with configurable smoothing."""
-        peak_values = peaks['Peak']
+        # Extract just the threshold values from the structured array
+        peak_values = peaks['Threshold']  # Changed from peaks to peaks['Threshold']
         
         # First normalize to mean=1
         peak_values = peak_values / np.mean(peak_values)

@@ -7,12 +7,20 @@ import numpy as np
 from abc import ABC, abstractmethod
 import warnings
 from typing import List, Tuple, Optional, NamedTuple
+from dataclasses import dataclass
 import matplotlib.pyplot as plt
-from flowmop_utils import Peak, process_histogram, standardize_marker_name, is_excluded_marker, find_left_minimum
+from .flowmop_utils import Peak, process_histogram, standardize_marker_name, is_excluded_marker, find_left_minimum
+
+@dataclass
+class DebrisGateResult:
+    """Results from debris gating operation."""
+    filtered_data: np.ndarray
+    fsc_threshold: Optional[float]
+    debris_vector: np.ndarray
 
 class DebrisGateStrategy(ABC):
     @abstractmethod
-    def gate(self, data: np.ndarray, marker_names: list[str]) -> tuple[np.ndarray, float, np.ndarray]:
+    def gate(self, data: np.ndarray, marker_names: list[str]) -> DebrisGateResult:
         """Apply debris gating to the data."""
         pass
 
@@ -24,7 +32,7 @@ class FSCDebrisGate(DebrisGateStrategy):
         self.percentage_cells_present = percentage_cells_present
         self.num_bins = num_bins
 
-    def gate(self, data: np.ndarray, marker_names: list[str]) -> tuple[np.ndarray, float, np.ndarray]:
+    def gate(self, data: np.ndarray, marker_names: list[str]) -> DebrisGateResult:
         """
         Apply FSC-based debris gating to the data.
         
@@ -33,10 +41,10 @@ class FSCDebrisGate(DebrisGateStrategy):
             marker_names: List of marker names
             
         Returns:
-            tuple: (filtered_data, fsc_threshold, debris_vector)
+            DebrisGateResult containing filtered data, threshold and debris vector
         """
         if not self._check_events_in_bottom_bin(data, marker_names):
-            return data, None, np.ones(data.shape[0], dtype=int)
+            return DebrisGateResult(filtered_data=data, fsc_threshold=None, debris_vector=np.ones(data.shape[0], dtype=int))
 
         # Set negative fluorescence values to 0
         data = np.where(data < 0, 0, data)
@@ -56,14 +64,14 @@ class FSCDebrisGate(DebrisGateStrategy):
         fsc_thresholds = self._get_fsc_thresholds(data, valid_peaks_mask, peaks_list, positive_masks, fsc_column)
 
         if not fsc_thresholds:
-            return data, None, np.ones(data.shape[0], dtype=int)
+            return DebrisGateResult(filtered_data=data, fsc_threshold=None, debris_vector=np.ones(data.shape[0], dtype=int))
 
         # Calculate final threshold and apply gating
         fsc_gate_threshold = np.nanmedian(fsc_thresholds)
         debris_vector = (data[:, fsc_column] >= fsc_gate_threshold).astype(int)
         filtered_data = data[debris_vector == 1]
 
-        return filtered_data, fsc_gate_threshold, debris_vector
+        return DebrisGateResult(filtered_data=filtered_data, fsc_threshold=fsc_gate_threshold, debris_vector=debris_vector)
 
     def _check_events_in_bottom_bin(self, fcs_array: np.ndarray, marker_names: list[str]) -> bool:
         """Check if events exist in the bottom 10th bin of FSC-A and SSC-A."""
@@ -321,13 +329,7 @@ def peak_width_debris(smoothed_hist, peak_indices, bin_edges, percentage_cells_p
     for i, peak_index in enumerate(peak_indices):
         # For first peak, search left until we find a minimum
         if i == 0:
-            # Search backwards from peak to find minimum
-            left_idx = peak_index
-            while left_idx > 0:
-                if smoothed_hist[left_idx] <= smoothed_hist[left_idx - 1]:
-                    left_idx -= 1
-                else:
-                    break
+            left_idx = find_left_minimum(smoothed_hist, peak_index, None)
         else:
             # For all other peaks, find minimum between this peak and previous peak
             prev_peak = peak_indices[i-1]
