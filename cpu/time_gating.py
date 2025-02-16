@@ -7,13 +7,57 @@ import warnings
 from typing import Union, Tuple, List, Dict
 import numpy as np
 import numpy.ma as ma
+import dask as da
+import dask.array as da
 from scipy.ndimage import maximum_filter1d
 from scipy.interpolate import UnivariateSpline
 from abc import ABC, abstractmethod
-from .flowmop_utils import process_histogram, Peak  # Changed to relative import
-import matplotlib.pyplot as plt
+from .flowmop_utils import process_histogram, Peak
+import cProfile
+import pstats
+from pstats import SortKey
+import io
+import time
+import os
+
+ArrayType = Union[np.ndarray, da.Array]
+
+def profile_function(func):
+    """Decorator to profile a function using cProfile."""
+    def wrapper(*args, **kwargs):
+        profiler = cProfile.Profile()
+        try:
+            profiler.enable()
+            result = func(*args, **kwargs)
+            profiler.disable()
+            
+            # Create stats object and sort by cumulative time
+            stats = pstats.Stats(profiler)
+            stats.sort_stats(SortKey.CUMULATIVE)
+            
+            # Print to both console and file
+            print("\nProfiling results for {}:".format(func.__name__))
+            stats.print_stats(20)  # Print top 20 functions
+            
+            # Save detailed stats to file
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            filename = f"profile_{func.__name__}_{timestamp}.stats"
+            stats_path = os.path.join(os.getcwd(), "profiling", filename)
+            os.makedirs(os.path.dirname(stats_path), exist_ok=True)
+            
+            # Save full stats to file
+            stats.dump_stats(stats_path)
+            print(f"\nFull profiling stats saved to: {stats_path}")
+            
+            return result
+        finally:
+            profiler.disable()
+    return wrapper
 
 class TimeGateStrategy(ABC):
+    def __init__(self):
+        self._debug_info = {}
+
     @abstractmethod
     def gate(self, data: np.ndarray, time_channel_index: int, marker_names: list) -> tuple[np.ndarray, np.ndarray]:
         """Apply time gating to the data."""
@@ -21,7 +65,9 @@ class TimeGateStrategy(ABC):
 
 class MADTimeGate(TimeGateStrategy):
     def __init__(self, remove_zeros=True, min_cells=150, max_bins=500, step=200, mad_threshold=6,
-                 peak_removal=1/3, min_nr_bins_peakdetection=5, histogram_smoothing=5, mad_method='all', mad_smoothing=[0.1, 1.0]):
+                 peak_removal=1/3, min_nr_bins_peakdetection=5, histogram_smoothing=5, mad_method='all', mad_smoothing=[0.1, 1.0],
+                 enable_dask=True, chunk_size=None):
+        super().__init__()
         self.remove_zeros = remove_zeros
         self.min_cells = min_cells
         self.max_bins = max_bins
@@ -33,59 +79,87 @@ class MADTimeGate(TimeGateStrategy):
         self.mad_method = mad_method
         self.mad_smoothing = mad_smoothing
         self.plot_counter = 0
+        self.enable_dask = enable_dask
+        self.chunk_size = chunk_size
 
-    def gate(self, data: np.ndarray, time_channel_index: int, marker_names: list) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Apply MAD-based time gating to the data.
+    @profile_function
+    def gate(self, data: ArrayType, time_channel_index: int, marker_names: list[str]) -> Tuple[ArrayType, ArrayType]:
+        """Apply MAD-based time gating with Dask parallelization."""
+        import dask.array as da
         
-        Args:
-            data: Flow cytometry data array
-            time_channel_index: Index of the time channel
-            marker_names: List of marker names corresponding to each channel
-            
-        Returns:
-            tuple: (filtered_data, time_gate_vector)
-        """
+        # Convert to Dask array if enabled
+        if self.enable_dask and not isinstance(data, da.Array):
+            data = da.from_array(data, chunks=self.chunk_size or 'auto')
+
         # Calculate optimal number of events per bin
         events_per_bin = self._find_events_per_bin(data)
         breaks = self._make_breaks(events_per_bin, data.shape[0])
-        print(f"Number of time bins: {len(breaks)}")
-        
-        fluoro_channels = [i for i, name in enumerate(marker_names) 
-                         if i != time_channel_index and 
+
+        # Identify fluorescent channels to process
+        fluoro_channels = [i for i, name in enumerate(marker_names)
+                         if i != time_channel_index and
                          not any(x.lower() in name.lower() for x in ['fsc', 'ssc', 'time'])]
-        
-        thresholds = self._determine_thresholds_all_channels(data, fluoro_channels, breaks['breaks'], marker_names)
-        # Initialize array to count how many channels reject each cell
-        rejection_count = np.zeros(data.shape[0], dtype=int)
-        
-        # Process each channel
-        for channel_thresholds in thresholds.values():
-            if self.mad_method == 'short':
-                # Short-term filtering only (s=0.1)
-                results = self._mad_excluder(channel_thresholds, self.mad_threshold, breaks['breaks'], 
-                                          data.shape[0], smoothing_factor=0.1)
-                rejected_cells = ~results['cells']
-            elif self.mad_method == 'long':
-                # Long-term filtering only (s=1.0)
-                results = self._mad_excluder(channel_thresholds, self.mad_threshold, breaks['breaks'], 
-                                          data.shape[0], smoothing_factor=1.0)
-                rejected_cells = ~results['cells']
-            else:  # 'all' - default
-                # Both short and long-term filtering
-                short_results = self._mad_excluder(channel_thresholds, self.mad_threshold, breaks['breaks'], 
-                                                 data.shape[0], smoothing_factor=0.1)
-                long_results = self._mad_excluder(channel_thresholds, self.mad_threshold, breaks['breaks'], 
-                                                data.shape[0], smoothing_factor=1.0)
-                rejected_cells = ~(short_results['cells'] & long_results['cells'])
+
+        # Precompute global channel statistics
+        global_stats = {}
+        for channel in fluoro_channels:
+            channel_data = data[:, channel]
+            if isinstance(channel_data, da.Array):
+                global_stats[channel] = {
+                    'p99': da.percentile(channel_data, 99).compute(),
+                    'max': da.max(channel_data).compute()
+                }
+            else:
+                global_stats[channel] = {
+                    'p99': np.percentile(channel_data, 99),
+                    'max': np.max(channel_data)
+                }
+
+        def process_chunk(chunk, channel_idx, global_p99, global_max):
+            """Process a chunk of data for a specific channel."""
+            processed_chunk = self._preprocess_channel_data(chunk)
             
-            rejection_count[rejected_cells] += 1
-        
-        # Create final gate vector - reject cells that were rejected by 2 or more channels
-        time_gate_vector = rejection_count < 2
-        filtered_data = data[time_gate_vector]
-        
-        return filtered_data, time_gate_vector
+            # Generate histogram for this chunk
+            hist, bin_edges = self._generate_histogram(processed_chunk)
+            
+            # Find peaks and calculate MAD
+            peaks = self.find_peaks(hist)
+            mad = self.calculate_mad(peaks)
+            
+            # Identify valid time bins and create gate vector
+            valid_bins = self._identify_valid_bins(peaks, mad)
+            return self._create_gate_vector(processed_chunk, bin_edges, valid_bins)
+
+        if isinstance(data, da.Array):
+            # Dask processing using map_blocks
+            gate_vectors = []
+            for channel in fluoro_channels:
+                channel_data = data[:, channel]
+                gate_vector = da.map_blocks(
+                    process_chunk,  # Function to apply
+                    channel_data,   # Input array
+                    channel,        # Channel index
+                    global_stats[channel]['p99'],  # Precomputed 99th percentile
+                    global_stats[channel]['max'],  # Precomputed max value
+                    dtype=bool,     # Output dtype
+                    meta=np.array((), dtype=bool)  # Metadata template
+                ).persist()  # Keep in memory for reuse
+                gate_vectors.append(gate_vector)
+            
+            # Combine results across channels
+            combined_vector = da.all(da.stack(gate_vectors), axis=0)
+            return data[combined_vector], combined_vector
+            
+        else:
+            # Standard numpy processing
+            rejection_count = np.zeros(data.shape[0], dtype=int)
+            for channel in fluoro_channels:
+                chunk_results = [process_chunk(data[:, channel][break_idx], channel)
+                                for break_idx in breaks['breaks']]
+                rejection_count += np.concatenate(chunk_results)
+            
+            time_gate_vector = rejection_count < 2
+            return data[time_gate_vector], time_gate_vector
 
     def _find_events_per_bin(self, arr):
         """Calculate optimal number of events per bin."""
@@ -137,13 +211,15 @@ class MADTimeGate(TimeGateStrategy):
         
         return threshold_frames
 
-    def _preprocess_channel_data(self, channel_data):
+    def _preprocess_channel_data(self, channel_data, global_p99=None, global_max=None):
         """
-        Preprocess channel data to handle limit-of-detection and data quality issues.
-        Applies arcsinh transform to handle large dynamic range.
+        Preprocess channel data with Dask-compatible statistics handling.
+        Applies arcsinh transform and uses global statistics when available.
         
         Args:
             channel_data: 1D array of channel values
+            global_p99: Precomputed 99th percentile (for Dask)
+            global_max: Precomputed max value (for Dask)
             
         Returns:
             Preprocessed channel data with arcsinh transform applied
@@ -154,16 +230,17 @@ class MADTimeGate(TimeGateStrategy):
         # Apply arcsinh transform
         processed_data = np.arcsinh(processed_data/150)
         
-        # Handle limit of detection (if >0.5% at max value)
-        max_val = np.max(processed_data)
-        pct_at_max = np.mean(processed_data == max_val) * 100
-        if pct_at_max > 0.5:
-            # Drop everything above 99th percentile and below 1st percentile
-            p99 = np.percentile(processed_data, 99)
-            processed_data = processed_data[(processed_data <= p99)]
+        # Use provided global statistics or compute locally
+        max_val = global_max if global_max is not None else np.max(processed_data)
+        p99 = global_p99 if global_p99 is not None else np.quantile(processed_data, 0.99)
         
-        # # Clip to 99th quantile
-        p99 = np.quantile(processed_data, 0.99)
+        # Handle limit of detection using global/local stats
+        if global_max is None:  # Only check if not using precomputed values
+            pct_at_max = np.mean(processed_data == max_val) * 100
+            if pct_at_max > 0.5:
+                processed_data = processed_data[(processed_data <= p99)]
+        
+        # Clip to 99th quantile using appropriate value
         processed_data = np.clip(processed_data, None, p99)
         
         # Set negative values to zero
@@ -178,23 +255,6 @@ class MADTimeGate(TimeGateStrategy):
         
         # Use processed data for peak detection
         full_channel_thresholds = self._timegate_threshold_detection(processed_data, smoothing=self.histogram_smoothing)
-        
-        # # Plot the full channel histogram and peaks
-        # result = flowmop_utils.process_histogram(processed_data, smoothing_window=self.histogram_smoothing, num_bins=100, filter_extremes=False)
-        # if result is not None:
-        #     smoothed_hist, bin_edges, peak_indices, peak_densities = result
-        #     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-            
-        #     plt.figure(figsize=(10, 6))
-        #     plt.hist(processed_data, bins=100, density=True, alpha=0.5, color='gray', label='Raw data')
-        #     plt.plot(bin_centers, smoothed_hist, 'b-', label='Smoothed histogram')
-        #     plt.plot(full_channel_peaks, np.interp(full_channel_peaks, bin_centers, smoothed_hist), 
-        #             'ro', label='Detected peaks')
-        #     plt.xlabel(f'{marker_name} Value')
-        #     plt.ylabel('Density')
-        #     plt.title(f'Full Channel Peak Detection - {marker_name}')
-        #     plt.legend()
-        #     plt.show()
         
         if np.all(np.isnan(full_channel_thresholds)):
             return None
@@ -392,30 +452,6 @@ class MADTimeGate(TimeGateStrategy):
         
         removed = self._removed_bins(breaks, to_remove_bins, nr_cells)
         contribution_mad = round((len(removed['cell_ids']) / nr_cells) * 100, 2)
-        
-        # # Plot MAD thresholds and peaks over time
-        # plt.figure(figsize=(10, 6))
-        # time_points = np.arange(len(peak_values))
-        
-        # # Plot original peaks and removed peaks (normalized)
-        # plt.scatter(time_points[~to_remove_bins], peak_values[~to_remove_bins], alpha=0.5, label='Valid Peaks')
-        # plt.scatter(time_points[to_remove_bins], peak_values[to_remove_bins], alpha=0.5, color='red', label='Removed Peaks')
-        
-        # # Plot the smoothing spline
-        # plt.plot(time_points, smoothed_peaks, 'b-', label=f'Smoothing Spline (s={smoothing_factor})', alpha=0.7)
-        
-        # # Plot MAD thresholds
-        # plt.axhline(y=upper_interval, color='g', linestyle='--', label='Upper MAD Threshold')
-        # plt.axhline(y=lower_interval, color='g', linestyle='--', label='Lower MAD Threshold')
-        # plt.axhline(y=1.0, color='k', linestyle=':', label='Mean (1.0)', alpha=0.5)
-        
-        # plt.xlabel('Time Bin')
-        # plt.ylabel('Normalized Peak Value')
-        # plt.title(f'Normalized Peak Values with MAD Thresholds (smoothing={smoothing_factor})')
-        # plt.legend()
-        # plt.grid(True)
-        # plt.tight_layout()
-        # plt.show()
         
         return {
             "cells": removed['cells'],

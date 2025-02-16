@@ -4,6 +4,8 @@ Handles detection and removal of debris in flow cytometry data.
 """
 
 import numpy as np
+import dask.array as da
+from typing import Union
 from abc import ABC, abstractmethod
 import warnings
 from typing import List, Tuple, Optional, NamedTuple
@@ -25,12 +27,14 @@ class DebrisGateStrategy(ABC):
         pass
 
 class FSCDebrisGate(DebrisGateStrategy):
-    def __init__(self, min_peaks=2, max_peaks=5, smoothing_window=3, percentage_cells_present=5, num_bins=100):
+    def __init__(self, min_peaks=2, max_peaks=5, smoothing_window=3, percentage_cells_present=5, num_bins=100, enable_dask=True, chunk_size=None):
         self.min_peaks = min_peaks
         self.max_peaks = max_peaks
         self.smoothing_window = smoothing_window
         self.percentage_cells_present = percentage_cells_present
         self.num_bins = num_bins
+        self.enable_dask = enable_dask
+        self.chunk_size = chunk_size
 
     def gate(self, data: np.ndarray, marker_names: list[str]) -> DebrisGateResult:
         """
@@ -357,4 +361,3 @@ def peak_width_debris(smoothed_hist, peak_indices, bin_edges, percentage_cells_p
             peak_widths.append((bin_edges[left_idx], bin_edges[right_idx]))
     
     return peak_widths
-

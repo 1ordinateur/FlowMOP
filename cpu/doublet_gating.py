@@ -189,7 +189,7 @@ class InflectionDoubletGate(DoubletGateStrategy):
     This method finds natural breakpoints in the FSC and SSC ratio distributions
     to determine optimal thresholds for doublet discrimination.
     """
-    def __init__(self, bins='auto', smoothing_factor=0.5, fallback_mad_threshold=5):
+    def __init__(self, bins='auto', smoothing_factor=0.5, fallback_mad_threshold=5, enable_dask=True, chunk_size=None):
         """
         Initialize the inflection point-based doublet gating strategy.
         
@@ -202,6 +202,8 @@ class InflectionDoubletGate(DoubletGateStrategy):
         self.smoothing_factor = smoothing_factor
         self.fallback_mad_threshold = fallback_mad_threshold
         self._debug_info = {}  # Store intermediate results for debugging
+        self.enable_dask = enable_dask
+        self.chunk_size = chunk_size
 
     def gate(self, data: np.ndarray, marker_names: list[str]) -> tuple[np.ndarray, np.ndarray]:
         """
