@@ -6,26 +6,16 @@ Main integration module that coordinates the gating operations.
 import warnings
 from typing import Optional, Tuple, Dict, Literal, Union, Any
 import numpy as np
-import cupy as cp
 
 # Type definitions
 import dask.array as da
-import dask
 ArrayType = Union[np.ndarray, da.Array]
 DEFAULT_ARRAY_MODULE = np
-HAS_GPU = cp.cuda.is_available()
 
 # Import CPU implementations
-from cpu.time_gating import TimeGateStrategy, MADTimeGate
-from cpu.debris_gating import DebrisGateStrategy, FSCDebrisGate
-from cpu.doublet_gating import DoubletGateStrategy, MADDoubletGate, InflectionDoubletGate
-
-# Import GPU implementations if available
-if HAS_GPU:
-    from accelerated.debris_gating_accelerated import DaskGPUFSCDebrisGate
-    from accelerated.doublet_gating_accelerated import CuPyMADDoubletGate, CuPyInflectionDoubletGate
-    from accelerated.time_gating_accelerated import DaskGPUMADTimeGate
-    DEFAULT_ARRAY_MODULE = da
+from .cpu.time_gating import TimeGateStrategy, MADTimeGate
+from .cpu.debris_gating import DebrisGateStrategy, FSCDebrisGate
+from .cpu.doublet_gating import DoubletGateStrategy, MADDoubletGate, InflectionDoubletGate
 
 class FlowMOP:
     """Main class for the Flow Cytometry Multi-Operation Pipeline."""
@@ -46,7 +36,7 @@ class FlowMOP:
                  time_channel_index=None,
                  doublet_method: Literal['mad', 'inflection'] = 'inflection',
                  doublet_config: Optional[dict] = None,
-                 use_gpu: bool = True,
+                 enable_dask: bool = True,
                  chunk_size: Optional[int] = None):
         """
         Initialize FlowMOP with configuration parameters.
@@ -72,21 +62,14 @@ class FlowMOP:
                     - bins: Number of bins or method ('auto', 'fd', 'scott')
                     - smoothing_factor: KDE smoothing factor (0.1 to 1.0)
                     - fallback_mad_threshold: Fallback MAD threshold
-            use_gpu: Whether to use GPU acceleration if available
             chunk_size: Size of chunks for DASK array operations
         """
-        self.use_gpu = use_gpu and HAS_GPU
-        self.chunk_size = chunk_size or 10000  # Default chunk size if none provided
-        
-        # Convert parameters to GPU types if using GPU
-        if self.use_gpu:
-            self.dtype = cp.float32
-            self.int_dtype = cp.int32
-            dask.config.set({"array.backend": "cupy"})
-
+        if enable_dask:
+            self.chunk_size = chunk_size or 10000  # Default chunk size if none provided
         else:
-            self.dtype = np.float32
-            self.int_dtype = np.int32
+            self.chunk_size = None
+        self.dtype = np.float32
+        self.int_dtype = np.int32
 
         # Common parameters for all gating strategies
         time_params = {
@@ -99,7 +82,8 @@ class FlowMOP:
             'min_nr_bins_peakdetection': self.int_dtype(5),
             'histogram_smoothing': self.int_dtype(smoothing_window*2),
             'mad_smoothing': self.dtype(mad_smoothings),
-            'mad_method': mad_method
+            'mad_method': mad_method,
+            'enable_dask': enable_dask
         }
         
         debris_params = {
@@ -107,14 +91,13 @@ class FlowMOP:
             'max_peaks': self.int_dtype(max_peaks),
             'smoothing_window': self.int_dtype(smoothing_window),
             'percentage_cells_present': self.dtype(percentage_cells_present),
-            'num_bins': self.int_dtype(100)
+            'num_bins': self.int_dtype(100),
+            'enable_dask': enable_dask
         }
-        # Configure gating strategies
-        self.time_gate = (DaskGPUMADTimeGate(**time_params) if self.use_gpu 
-                         else MADTimeGate(**time_params))
         
-        self.debris_gate = (DaskGPUFSCDebrisGate(**debris_params) if self.use_gpu 
-                           else FSCDebrisGate(**debris_params))
+        # Configure gating strategies
+        self.time_gate = MADTimeGate(**time_params)
+        self.debris_gate = FSCDebrisGate(**debris_params)
         
         # Configure doublet gating
         doublet_config = doublet_config or {}
@@ -124,33 +107,18 @@ class FlowMOP:
                 'smoothing_factor': self.dtype(doublet_config.get('smoothing_factor', 0.5)),
                 'fallback_mad_threshold': self.dtype(doublet_config.get('fallback_mad_threshold', 5))
             }
-            self.doublet_gate = (CuPyInflectionDoubletGate(**config) if self.use_gpu 
-                                else InflectionDoubletGate(**config))
+            self.doublet_gate = InflectionDoubletGate(**config)
         else:
-            self.doublet_gate = (CuPyMADDoubletGate(mad_threshold=self.dtype(mad)) if self.use_gpu 
-                                else MADDoubletGate(mad_threshold=mad))
+            self.doublet_gate = MADDoubletGate(mad_threshold=mad)
             
         self.time_channel_index = time_channel_index
         self.skip_doublet_removal = False
         self.skip_debris_removal = False
+        self.enable_dask = enable_dask
         self._debug_info = {}
-
-    def _to_gpu_array(self, data: ArrayType) -> da.Array:
-        """Convert input array to GPU-backed dask array if using GPU."""
-        if not self.use_gpu:
-            return data
-            
-        if isinstance(data, da.Array):
-            if data.chunks is None:
-                data = data.rechunk(chunks=(self.chunk_size, -1))
-            return data.map_blocks(cp.asarray)
-        
-        return da.from_array(data, chunks=(self.chunk_size, -1)).map_blocks(cp.asarray)
 
     def _process_array(self, data: ArrayType) -> da.Array:
         """Process array to ensure it's in the correct format for computations."""
-        if self.use_gpu:
-            return self._to_gpu_array(data)
         return data
 
     def process_fcs_data(self, marker_names: list[str], fcs_array: ArrayType) -> Dict[str, ArrayType]:
@@ -158,14 +126,16 @@ class FlowMOP:
         if len(marker_names) != fcs_array.shape[1]:
             raise ValueError("The number of marker names does not match the number of dimensions in the FCS array.")
 
-        # Convert data to GPU array if using GPU
-        fcs_array = self._process_array(fcs_array)
-        
-        # Initialize vectors with correct array type
-        if isinstance(fcs_array, da.Array):
-            ones = da.ones(fcs_array.shape[0],
-                         chunks=fcs_array.chunks[0],
-                         dtype=self.int_dtype)
+        # Initialize vectors with proper Dask chunking
+        if self.enable_dask:
+            # Ensure consistent chunking along rows, preserve column chunks
+            if isinstance(fcs_array, np.ndarray):
+                fcs_array = da.from_array(fcs_array, chunks=(self.chunk_size or 'auto', -1))
+            elif not fcs_array.chunks[0][0] == fcs_array.chunks[0][-1]:  # Check chunk uniformity
+                fcs_array = fcs_array.rechunk((self.chunk_size or 'auto', -1))
+            
+            # Create vectors matching input chunk structure
+            ones = da.ones_like(fcs_array[:,0], chunks=fcs_array.chunks[0], dtype=self.int_dtype)
         else:
             ones = np.ones(fcs_array.shape[0], dtype=self.int_dtype)
         
@@ -176,30 +146,83 @@ class FlowMOP:
             'doublet': ones.copy()
         }
 
-        # Remove limit of detection events
-        _, vectors['lod'] = self.remove_limit_of_detection_events(fcs_array, marker_names)
-        vectors['lod'] = self._process_array(vectors['lod'])
+        # Process through gating pipeline
+        # Note: Individual gating operations may still compute internally
+        # as they need immediate results for threshold calculations
+        vectors = self._do_gating(fcs_array, vectors, marker_names)
 
-        # Apply time gating if time channel is specified
-        if self.time_channel_index is not None:
-            _, vectors['time'] = self.time_gate.gate(fcs_array, self.time_channel_index, marker_names)
-            vectors['time'] = self._process_array(vectors['time'])
+        # Calculate final vector using DASK optimized operations
+        if self.enable_dask:
+            # Combine vectors using parallel logical AND
+            final_vector = da.all(da.stack([
+                vectors['lod'],
+                vectors['debris'], 
+                vectors['time'],
+                vectors['doublet']
+            ]), axis=0)
+            
+            # Persist intermediate results in memory
+            vectors['final'] = final_vector.compute()
+        else:
+            final_vector = vectors['lod']
+            for key in ['debris', 'time', 'doublet']:
+                final_vector = final_vector & vectors[key]
+            vectors['final'] = final_vector
 
-        # Apply debris gating
-        if not self.skip_debris_removal:
-            result = self.debris_gate.gate(fcs_array, marker_names)
-            vectors['debris'] = self._process_array(result.debris_vector)
+        return vectors
+    
+    def _do_gating(self, data: ArrayType, vectors: Dict[str, ArrayType], marker_names: list[str]) -> Dict[str, ArrayType]:
+        """Perform all gating operations in parallel using DASK if enabled, otherwise sequentially."""
+        if self.enable_dask:
+            import dask
+            
+            # Create delayed objects for parallel execution
+            gates = {
+                'lod': dask.delayed(self.remove_limit_of_detection_events)(data, marker_names),
+                'time': dask.delayed(self.time_gate.gate)(data, self.time_channel_index, marker_names) 
+                    if self.time_channel_index else None,
+                'debris': dask.delayed(self.debris_gate.gate)(data, marker_names) 
+                    if not self.skip_debris_removal else None,
+                'doublet': dask.delayed(self.doublet_gate.gate)(data, marker_names) 
+                    if not self.skip_doublet_removal else None
+            }
 
-        # Apply doublet gating
-        if not self.skip_doublet_removal:
-            _, vectors['doublet'] = self.doublet_gate.gate(fcs_array, marker_names)
-            vectors['doublet'] = self._process_array(vectors['doublet'])
+            # Compute independent gates in parallel
+            computed = dask.compute(gates)[0]
 
-        # Calculate final vector using GPU operations if available
-        final_vector = vectors['lod']
-        for key in ['debris', 'time', 'doublet']:
-            final_vector = final_vector & vectors[key]
-        vectors['final'] = final_vector
+        else:
+            # Execute gates sequentially without dask
+            computed = {}
+            
+            # Run each gate operation
+            computed['lod'] = self.remove_limit_of_detection_events(data, marker_names)
+            
+            if self.time_channel_index:
+                computed['time'] = self.time_gate.gate(data, self.time_channel_index, marker_names)
+            else:
+                computed['time'] = None
+                
+            if not self.skip_debris_removal:
+                computed['debris'] = self.debris_gate.gate(data, marker_names)
+            else:
+                computed['debris'] = None
+                
+            if not self.skip_doublet_removal:
+                computed['doublet'] = self.doublet_gate.gate(data, marker_names)
+            else:
+                computed['doublet'] = None
+
+        # Process results
+        vectors['lod'] = self._process_array(computed['lod'][1])
+        
+        if computed['time']:
+            vectors['time'] = self._process_array(computed['time'][1])
+            
+        if computed['debris']:
+            vectors['debris'] = self._process_array(computed['debris'].debris_vector)
+            
+        if computed['doublet']:
+            vectors['doublet'] = self._process_array(computed['doublet'][1])
 
         return vectors
 
@@ -213,7 +236,6 @@ class FlowMOP:
                                     chunks=fcs_array.chunks[0] if isinstance(fcs_array, da.Array) else None,
                                     dtype=self.int_dtype)
 
-        # Process on GPU if available
         fsca_data = fcs_array[:, fsca_column]
         fsca_max = da.max(fsca_data).compute()
         max_events = da.sum(fsca_data == fsca_max).compute()
@@ -225,7 +247,7 @@ class FlowMOP:
             print(f"Removed {max_events} events ({max_events/total_events:.2%}) at the limit of detection.")
         else:
             lod_vector = da.ones(total_events, 
-                               chunks=fcs_array.chunks[0] if isinstance(fcs_array, da.Array) else None,
+                               chunks=fcs_array.chunks[0] if isinstance(fcs_array, da.Array) else self.chunk_size,
                                dtype=self.int_dtype)
             filtered_array = fcs_array
             print("Threshold events below limit of 1%. Retaining events.")
@@ -251,11 +273,6 @@ class FlowMOP:
                      marker_names: list[str], vectors: Dict[str, ArrayType]) -> None:
         """Export the processed data and filter vectors to CSV."""
         import pandas as pd
-        
-        # Convert to numpy for final export
-        if self.use_gpu:
-            fcs_array = fcs_array.map_blocks(cp.asnumpy).compute()
-            vectors = {k: v.map_blocks(cp.asnumpy).compute() for k, v in vectors.items()}
             
         df = pd.DataFrame(fcs_array, columns=marker_names)
         for name, vector in vectors.items():
