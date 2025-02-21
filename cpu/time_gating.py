@@ -18,6 +18,7 @@ import pstats
 from pstats import SortKey
 import io
 import time
+from loguru import logger
 import os
 
 ArrayType = Union[np.ndarray, da.Array]
@@ -183,10 +184,18 @@ class MADTimeGate(TimeGateStrategy):
         return events_per_bin
 
     def _make_breaks(self, events_per_bin, nr_events):
-        """Create time bins with overlap."""
+        """Create time bins with overlap and filter empty bins."""
         breaks = self._split_with_overlap(np.arange(nr_events), events_per_bin, 
                                         int(np.ceil(events_per_bin / 2)))
-        return {'breaks': breaks, 'events_per_bin': events_per_bin}
+        
+        # Filter out empty bins
+        non_empty_breaks = [bin_ for bin_ in breaks if len(bin_) > 0]
+        
+        if len(non_empty_breaks) < len(breaks):
+            empty_count = len(breaks) - len(non_empty_breaks)
+            logger.warning(f"Removed {empty_count} empty time bins from analysis")
+        
+        return {'breaks': non_empty_breaks, 'events_per_bin': events_per_bin}
 
     def _determine_thresholds_all_channels(self, data, channels, breaks, marker_names):
         """
