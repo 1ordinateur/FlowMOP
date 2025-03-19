@@ -6,18 +6,42 @@ import fcsparser
 import flowmop_new
 import dask.array as da
 
-def process_fcs_file(fcs_path: str, use_gpu: bool = True, output_dir: str = None) -> None:
+def load_data(file_path: str) -> tuple:
     """
-    Process a single FCS file through the FlowMOP pipeline.
+    Load data from either FCS or Parquet file.
     
     Args:
-        fcs_path: Path to the FCS file
-        use_gpu: Whether to use GPU acceleration
-        output_dir: Directory to save output files (defaults to same as input)
+        file_path: Path to the data file
+        
+    Returns:
+        tuple: (meta, data_frame)
     """
-    # Load FCS file
-    print(f"Loading FCS file: {fcs_path}")
-    meta, data = fcsparser.parse(fcs_path, reformat_meta=True)
+    file_path = Path(file_path)
+    if file_path.suffix.lower() == '.fcs':
+        print(f"Loading FCS file: {file_path}")
+        meta, data = fcsparser.parse(file_path, reformat_meta=True)
+    elif file_path.suffix.lower() == '.parquet':
+        print(f"Loading Parquet file: {file_path}")
+        data = pd.read_parquet(file_path)
+        # Create empty metadata for parquet files
+        meta = {'__file_type__': 'parquet'}
+    else:
+        raise ValueError(f"Unsupported file format: {file_path.suffix}. Supported formats are .fcs and .parquet")
+    
+    return meta, data
+
+def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'positives', mad_smoothing: list = None) -> None:
+    """
+    Process a data file through the FlowMOP pipeline.
+    
+    Args:
+        file_path: Path to the data file (FCS or Parquet)
+        output_dir: Directory to save output files (defaults to same as input)
+        fluor_mode: Mode for fluorescence analysis ('positives', 'geomean', or 'both')
+        mad_smoothing: List of smoothing factors for MAD-based time gating
+    """
+    # Load data file
+    meta, data = load_data(file_path)
     
     # Convert data to numpy array and get channel names
     fcs_array = data.values
@@ -30,15 +54,21 @@ def process_fcs_file(fcs_path: str, use_gpu: bool = True, output_dir: str = None
             time_channel_index = i
             break
     
+    # Set default mad_smoothing if not provided
+    if mad_smoothing is None:
+        mad_smoothing = [0.1, 1.0]
+    
     # Initialize FlowMOP
     flowmop = flowmop_new.FlowMOP(
-        use_gpu=use_gpu,
         time_channel_index=time_channel_index,
         remove_zeros=True,
         min_cells=500,
         max_bins=500,
         step=200,
-        MAD=6
+        MAD=6,
+        enable_dask=False,
+        fluor_mode=fluor_mode,
+        mad_smoothings=mad_smoothing
     )
     
     # Process the data
@@ -58,20 +88,44 @@ def process_fcs_file(fcs_path: str, use_gpu: bool = True, output_dir: str = None
     if output_dir:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
-        base_name = Path(fcs_path).stem
+        base_name = Path(file_path).stem
         output_file = output_path / f"{base_name}_processed.csv"
+        # Also export to FCS file
+        fcs_output_file = output_path / f"{base_name}_processed.fcs"
+        
+        # Create a pandas DataFrame with the original data
+        output_df = pd.DataFrame(fcs_array, columns=marker_names)
+        
+        # Add filter vectors as additional columns
+        for name, vector in vectors.items():
+            output_df[f'passed_{name}'] = vector.astype(int)
+        
+        # Write to FCS file with original data plus filter results
+        print(f"Exporting to FCS file: {fcs_output_file}")
+        import fcswrite
+        # Extract data and channel names from the DataFrame
+        data = output_df.values
+        channel_names = output_df.columns.tolist()
+        # Write to FCS file
+        fcswrite.write_fcs(filename=str(fcs_output_file), 
+                           chn_names=channel_names,
+                           data=data)
+        print(f"Data exported to FCS file: {fcs_output_file}")
         flowmop.export_to_csv(str(output_file), fcs_array, marker_names, vectors)
 
 def main():
-    parser = argparse.ArgumentParser(description='Process FCS files through FlowMOP pipeline')
-    parser.add_argument('fcs_files', nargs='+', help='Path(s) to FCS file(s) to process')
-    parser.add_argument('--gpu', action='store_true', help='Use GPU acceleration')
+    parser = argparse.ArgumentParser(description='Process data files through FlowMOP pipeline')
+    parser.add_argument('files', nargs='+', help='Path(s) to data file(s) to process (FCS or Parquet)')
     parser.add_argument('--output-dir', help='Directory to save output files')
+    parser.add_argument('--fluor-mode', choices=['positives', 'geomean', 'both'], default='positives',
+                        help='Mode for fluorescence anomaly detection (default: positives)')
+    parser.add_argument('--mad-smoothing', type=float, nargs='+', default=[0.1, 1.0],
+                        help='Smoothing factors for MAD-based time gating (default: 0.1 1.0)')
     
     args = parser.parse_args()
     
-    for fcs_file in args.fcs_files:
-        process_fcs_file(fcs_file, args.gpu, args.output_dir)
+    for file_path in args.files:
+        process_file(file_path, args.output_dir, args.fluor_mode, args.mad_smoothing)
 
 if __name__ == '__main__':
     main()

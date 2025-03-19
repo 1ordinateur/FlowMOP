@@ -30,7 +30,7 @@ def analyze_histogram(data: np.ndarray, num_bins: int, smoothing_window: int, fi
         HistogramAnalysis object
     """
 
-    min_val, max_val = np.quantile(data, [0.001, 0.999])
+    min_val, max_val = np.percentile(data, [0.1, 99.9])
     bin_edges = np.linspace(min_val, max_val, num_bins + 1)
     hist, _ = np.histogram(data, bins=bin_edges, density=True)
 
@@ -112,7 +112,11 @@ def find_peaks(hist: np.ndarray, smoothing_window: int) -> np.ndarray:
             
             if min_heights:
                 highest_min = max(min_heights)
-                prominence = (peak_height - highest_min) / peak_height
+                # Avoid division by zero or negative values that could cause warnings
+                if peak_height > 0 and peak_height > highest_min:
+                    prominence = (peak_height - highest_min) / peak_height
+                else:
+                    prominence = 0.0  # Default to zero prominence if calculation is invalid
                 if prominence >= 0.1:
                     prominent_peaks.append(peak_idx)
             else:
@@ -120,7 +124,6 @@ def find_peaks(hist: np.ndarray, smoothing_window: int) -> np.ndarray:
         
         t1 = time.perf_counter()
         timings['prominence_filtering'] = t1 - t0
-        print(f"Peak finding timings: {timings}")
         return np.array(prominent_peaks)
     
     t1 = time.perf_counter()
@@ -199,4 +202,88 @@ def standardize_marker_name(name: str) -> str:
 
 def is_excluded_marker(marker: str) -> bool:
     """Check if marker should be excluded from analysis."""
-    return marker.lower() in ['time', 'fsc-a', 'fsc-h', 'fsc-w', 'ssc-a', 'ssc-h', 'ssc-w'] 
+    return marker.lower() in ['time', 'fsc-a', 'fsc-h', 'fsc-w', 'ssc-a', 'ssc-h', 'ssc-w']
+
+def normalize_timeseries_values(values: np.ndarray) -> np.ndarray:
+    """
+    Normalize time series values for consistent MAD-based outlier detection.
+    
+    Performs these steps:
+    1. Normalize to mean=1
+    2. Scale to target standard deviation of 0.1
+    3. Shift values so median is 1
+    
+    Args:
+        values: Time series values to normalize
+        
+    Returns:
+        Normalized values
+    """
+    # Ensure we have a copy to avoid modifying the original
+    normalized = values.copy()
+    
+    # Normalize to mean=1
+    normalized = normalized / np.mean(normalized)
+    
+    # Scale to target standard deviation of 0.1
+    current_std = np.std(normalized)
+    if current_std > 0:  # Avoid division by zero
+        target_std = 0.1
+        normalized = normalized * (target_std / current_std)
+    
+    # Shift values so median is 1
+    current_median = np.median(normalized)
+    normalized = normalized + (1 - current_median)
+    
+    return normalized
+
+def apply_spline_smoothing(values: np.ndarray, smoothing_factor: float, n_bins: int = None) -> np.ndarray:
+    """
+    Apply spline smoothing to time series values with adaptive smoothing factor.
+    
+    Args:
+        values: Time series values to smooth
+        smoothing_factor: Base smoothing factor
+        n_bins: Number of bins for scaling the smoothing factor
+        
+    Returns:
+        Smoothed values
+    """
+    from scipy.interpolate import UnivariateSpline
+    
+    # Scale smoothing factor based on number of bins
+    if n_bins is None:
+        n_bins = len(values)
+    
+    # Scale smoothing factor based on number of bins
+    scaled_smoothing = smoothing_factor * n_bins / 100
+    # Clamp between 0.1 and 2.0
+    scaled_smoothing = max(0.1, min(2.0, scaled_smoothing))
+    
+    # Apply spline smoothing
+    x_indices = np.arange(len(values))
+    spline = UnivariateSpline(x_indices, values, s=scaled_smoothing)
+    return spline(x_indices)
+
+def calculate_mad_thresholds(values: np.ndarray, mad_threshold: float) -> tuple[float, float, np.ndarray]:
+    """
+    Calculate MAD-based outlier detection thresholds.
+    
+    Args:
+        values: Time series values (typically smoothed)
+        mad_threshold: Number of MADs to use as threshold
+        
+    Returns:
+        Tuple of (lower_threshold, upper_threshold, outlier_mask)
+    """
+    # Calculate MAD thresholds
+    median_val = np.median(values)
+    mad_val = np.median(np.abs(values - median_val))
+    
+    upper_threshold = median_val + mad_threshold * mad_val
+    lower_threshold = median_val - mad_threshold * mad_val
+    
+    # Identify outliers
+    outliers = (values > upper_threshold) | (values < lower_threshold)
+    
+    return lower_threshold, upper_threshold, outliers 

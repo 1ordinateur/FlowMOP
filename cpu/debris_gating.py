@@ -5,13 +5,14 @@ Handles detection and removal of debris in flow cytometry data.
 
 import numpy as np
 import dask.array as da
+import dask
 from typing import Union
 from abc import ABC, abstractmethod
 import warnings
 from typing import List, Tuple, Optional, NamedTuple
 from dataclasses import dataclass
 import matplotlib.pyplot as plt
-from .flowmop_utils import Peak, process_histogram, standardize_marker_name, is_excluded_marker, find_left_minimum
+from cpu.flowmop_utils import Peak, process_histogram, standardize_marker_name, is_excluded_marker, find_left_minimum
 
 @dataclass
 class DebrisGateResult:
@@ -210,51 +211,68 @@ class FSCDebrisGate(DebrisGateStrategy):
         fsc_thresholds = []
 
         # For every feature, run through and check for peaks
+        delayed_thresholds = []
+        
         for i, (is_valid, peaks, positive_mask) in enumerate(zip(valid_peaks_mask, peaks_list, positive_masks)):
             if is_valid and len(peaks) >= 2 and positive_mask is not None:
                 # Use the positive mask from detect_fluoropeaks
                 positive_fsc = data[positive_mask, fsc_column]
                 
-                # Process histogram for this positive population
-                pos_result = process_histogram(positive_fsc, self.smoothing_window)
-                if pos_result is not None:
-                    # Find FSC threshold using positive cells and reference peaks
-                    threshold = self._find_fsc_threshold(pos_result, all_fsc_peaks, self.smoothing_window)
-                    
-                    if threshold is not None:
-                        fsc_thresholds.append(threshold)
+                # Define a function to process a single feature
+                @dask.delayed
+                def process_feature(feature_idx, pos_fsc, ref_peaks, window):
+                    # Process histogram for this positive population
+                    pos_result = process_histogram(pos_fsc, window)
+                    if pos_result is not None:
+                        # Find FSC threshold using positive cells and reference peaks
+                        threshold = self._find_fsc_threshold(pos_result, ref_peaks, window)
                         
-                        # Optional plotting
-                        if False:
-                            # Create a figure with two subplots side by side
-                            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+                        if threshold is not None:
+                            # Optional plotting
+                            if False:
+                                # Create a figure with two subplots side by side
+                                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+                                
+                                # Plot 1: Full FSC Distribution
+                                bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                                ax1.plot(bin_centers, smoothed_hist, 'b-', label='All Cells')
+                                ax1.plot(bin_centers[ref_peak_indices], smoothed_hist[ref_peak_indices], 'ro', label='Peaks')
+                                ax1.set_xlabel('FSC-A')
+                                ax1.set_ylabel('Density')
+                                ax1.set_title('Full FSC Distribution')
+                                ax1.axvline(x=threshold, color='g', linestyle='--', label='Threshold')
+                                ax1.legend()
+                                
+                                # Plot 2: Positive Population
+                                pos_hist, pos_bin_edges, pos_peak_indices, _ = pos_result
+                                pos_bin_centers = (pos_bin_edges[:-1] + pos_bin_edges[1:]) / 2
+                                ax2.plot(pos_bin_centers, pos_hist, 'b-', label='Positive Cells')
+                                ax2.plot(pos_bin_centers[pos_peak_indices], pos_hist[pos_peak_indices], 'ro', label='Peaks')
+                                ax2.axvline(x=threshold, color='g', linestyle='--', label='Threshold')
+                                ax2.set_xlabel('FSC-A')
+                                ax2.set_ylabel('Density')
+                                ax2.set_title('Positive Population FSC Distribution')
+                                ax2.legend()
+                                
+                                plt.suptitle(f'FSC Distribution Analysis - Feature {feature_idx}')
+                                plt.tight_layout()
+                                plt.show()
                             
-                            # Plot 1: Full FSC Distribution
-                            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-                            ax1.plot(bin_centers, smoothed_hist, 'b-', label='All Cells')
-                            ax1.plot(bin_centers[ref_peak_indices], smoothed_hist[ref_peak_indices], 'ro', label='Peaks')
-                            ax1.set_xlabel('FSC-A')
-                            ax1.set_ylabel('Density')
-                            ax1.set_title('Full FSC Distribution')
-                            ax1.axvline(x=threshold, color='g', linestyle='--', label='Threshold')
-                            ax1.legend()
-                            
-                            # Plot 2: Positive Population
-                            pos_hist, pos_bin_edges, pos_peak_indices, _ = pos_result
-                            pos_bin_centers = (pos_bin_edges[:-1] + pos_bin_edges[1:]) / 2
-                            ax2.plot(pos_bin_centers, pos_hist, 'b-', label='Positive Cells')
-                            ax2.plot(pos_bin_centers[pos_peak_indices], pos_hist[pos_peak_indices], 'ro', label='Peaks')
-                            ax2.axvline(x=threshold, color='g', linestyle='--', label='Threshold')
-                            ax2.set_xlabel('FSC-A')
-                            ax2.set_ylabel('Density')
-                            ax2.set_title('Positive Population FSC Distribution')
-                            ax2.legend()
-                            
-                            plt.suptitle(f'FSC Distribution Analysis - Feature {i}')
-                            plt.tight_layout()
-                            plt.show()
-                    else:
-                        fsc_thresholds.append(np.nan)
+                            return threshold
+                        
+                    return np.nan
+                
+                # Add the delayed computation for this feature
+                delayed_thresholds.append(process_feature(i, positive_fsc, all_fsc_peaks, self.smoothing_window))
+            else:
+                # For invalid features, add a placeholder
+                delayed_thresholds.append(dask.delayed(lambda: np.nan)())
+        
+        # Compute all thresholds in parallel
+        computed_thresholds = dask.compute(*delayed_thresholds)
+        
+        # Filter out the valid thresholds (not NaN)
+        fsc_thresholds = [t for t in computed_thresholds if not (isinstance(t, float) and np.isnan(t))]
         return fsc_thresholds
 
 def detect_fluoropeaks(data: np.ndarray, marker_names: List[str], min_peaks: int = 2, max_peaks: int = 5, 
@@ -266,29 +284,25 @@ def detect_fluoropeaks(data: np.ndarray, marker_names: List[str], min_peaks: int
     valid_peaks_mask = np.zeros(num_features, dtype=bool)
     positive_masks = []  # Store positive masks for each feature
     
-    for i, marker in enumerate(marker_names):
+    # Define a function to process a single marker
+    @dask.delayed
+    def process_marker(i, marker, data_transformed, smoothing_window, min_peaks, max_peaks, percentage_cells_present):
         # Skip excluded channels
         if is_excluded_marker(marker):
-            peaks_list.append([])
-            positive_masks.append(None)
-            continue
+            return i, [], None
             
         # Process histogram and get peaks
         result = process_histogram(data_transformed[i], smoothing_window)
         if result is None:
             print(f"No valid histogram for marker {marker}")
-            peaks_list.append([])
-            positive_masks.append(None)
-            continue
+            return i, [], None
             
         thresholded_hist, bin_edges, peak_indices, peak_densities = result
         
         # Check if we have enough peaks
         if len(peak_indices) < min_peaks:
             print(f"Insufficient peaks ({len(peak_indices)}) for marker {marker}")
-            peaks_list.append([])
-            positive_masks.append(None)
-            continue
+            return i, [], None
 
         # First sort peaks by position
         peak_positions = [(idx, bin_edges[idx]) for idx in peak_indices]
@@ -308,17 +322,29 @@ def detect_fluoropeaks(data: np.ndarray, marker_names: List[str], min_peaks: int
         
         # Convert to Peak objects
         peaks = [Peak(start=start, end=end) for start, end in peak_widths]
-        peaks_list.append(peaks)
-        valid_peaks_mask[i] = len(peaks) >= min_peaks
         
         # If we have at least 2 peaks, calculate positive cells
         if len(peaks) >= 2:
             second_peak = peaks[1]
             positive_mask = data_transformed[i] >= second_peak.start
-            positive_masks.append(positive_mask)
+            return i, peaks, positive_mask
         else:
             print(f"Not enough valid peaks after width analysis for marker {marker}")
-            positive_masks.append(None)
+            return i, peaks, None
+    
+    # Create delayed tasks for all markers
+    delayed_results = [process_marker(i, marker, data_transformed, smoothing_window, 
+                                     min_peaks, max_peaks, percentage_cells_present) 
+                      for i, marker in enumerate(marker_names)]
+    
+    # Compute all results in parallel
+    computed_results = dask.compute(*delayed_results)
+    
+    # Process the results
+    for idx, peaks, positive_mask in computed_results:
+        peaks_list.append(peaks)
+        valid_peaks_mask[idx] = len(peaks) >= min_peaks
+        positive_masks.append(positive_mask)
     
     return valid_peaks_mask, peaks_list, positive_masks
 

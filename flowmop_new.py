@@ -13,9 +13,9 @@ ArrayType = Union[np.ndarray, da.Array]
 DEFAULT_ARRAY_MODULE = np
 
 # Import CPU implementations
-from .cpu.time_gating import TimeGateStrategy, MADTimeGate
-from .cpu.debris_gating import DebrisGateStrategy, FSCDebrisGate
-from .cpu.doublet_gating import DoubletGateStrategy, MADDoubletGate, InflectionDoubletGate
+from cpu.time_gating import TimeGateStrategy, MADTimeGate
+from cpu.debris_gating import DebrisGateStrategy, FSCDebrisGate
+from cpu.doublet_gating import DoubletGateStrategy, MADDoubletGate, InflectionDoubletGate
 
 class FlowMOP:
     """Main class for the Flow Cytometry Multi-Operation Pipeline."""
@@ -37,7 +37,8 @@ class FlowMOP:
                  doublet_method: Literal['mad', 'inflection'] = 'inflection',
                  doublet_config: Optional[dict] = None,
                  enable_dask: bool = True,
-                 chunk_size: Optional[int] = None):
+                 chunk_size: Optional[int] = None,
+                 fluor_mode: str = 'positives'):
         """
         Initialize FlowMOP with configuration parameters.
         
@@ -47,13 +48,12 @@ class FlowMOP:
             max_bins: Maximum number of bins for histogram-based gating
             step: Step size for peak detection
             MAD: Median Absolute Deviation threshold for MAD-based gating
-            IT_limit: Limit for IT-based gating
-            peak_detection_smoothing: Smoothing factor for peak detection
-            spectral: Whether to use spectral gating
             mad: MAD threshold for MAD-based doublet gating
             min_peaks: Minimum number of peaks for peak detection
             max_peaks: Maximum number of peaks for peak detection
             smoothing_window: Smoothing window for peak detection
+            mad_smoothings: List of smoothing factors for MAD-based time gating
+            mad_method: Method for MAD-based time gating ('short', 'long', or 'all')
             percentage_cells_present: Percentage of cells required for gating
             time_channel_index: Index of time channel
             doublet_method: Method for doublet gating ('mad' or 'inflection')
@@ -62,7 +62,9 @@ class FlowMOP:
                     - bins: Number of bins or method ('auto', 'fd', 'scott')
                     - smoothing_factor: KDE smoothing factor (0.1 to 1.0)
                     - fallback_mad_threshold: Fallback MAD threshold
+            enable_dask: Whether to use Dask for parallel computation
             chunk_size: Size of chunks for DASK array operations
+            fluor_mode: Mode for fluorescence analysis ('positives', 'geomean', or 'both')
         """
         if enable_dask:
             self.chunk_size = chunk_size or 10000  # Default chunk size if none provided
@@ -83,7 +85,8 @@ class FlowMOP:
             'histogram_smoothing': self.int_dtype(smoothing_window*2),
             'mad_smoothing': self.dtype(mad_smoothings),
             'mad_method': mad_method,
-            'enable_dask': enable_dask
+            'enable_dask': enable_dask,
+            'fluor_mode': fluor_mode
         }
         
         debris_params = {
@@ -115,6 +118,7 @@ class FlowMOP:
         self.skip_doublet_removal = False
         self.skip_debris_removal = False
         self.enable_dask = enable_dask
+        self.fluor_mode = fluor_mode
         self._debug_info = {}
 
     def _process_array(self, data: ArrayType) -> da.Array:
@@ -232,23 +236,48 @@ class FlowMOP:
             fsca_column = self._get_marker_index(marker_names, 'fsca')
         except ValueError:
             warnings.warn("No FSC-A parameter found. Skipping limit of detection removal.")
-            return fcs_array, da.ones(fcs_array.shape[0], 
-                                    chunks=fcs_array.chunks[0] if isinstance(fcs_array, da.Array) else None,
-                                    dtype=self.int_dtype)
+            # Conditionally use dask based on enable_dask flag
+            if hasattr(self, 'enable_dask') and self.enable_dask:
+                return fcs_array, da.ones(fcs_array.shape[0], 
+                                        chunks=fcs_array.chunks[0] if isinstance(fcs_array, da.Array) else None,
+                                        dtype=self.int_dtype)
+            else:
+                # Use numpy when dask is disabled
+                return fcs_array, np.ones(fcs_array.shape[0], dtype=self.int_dtype)
 
         fsca_data = fcs_array[:, fsca_column]
-        fsca_max = da.max(fsca_data).compute()
-        max_events = da.sum(fsca_data == fsca_max).compute()
+        
+        # Conditionally compute max and sum based on enable_dask flag
+        if hasattr(self, 'enable_dask') and self.enable_dask:
+            fsca_max = da.max(fsca_data).compute()
+            max_events = da.sum(fsca_data == fsca_max).compute()
+        else:
+            # Use numpy when dask is disabled
+            fsca_max = np.max(fsca_data)
+            max_events = np.sum(fsca_data == fsca_max)
+        
         total_events = fcs_array.shape[0]
 
         if max_events / total_events > 0.01:
-            lod_vector = (fsca_data < fsca_max).astype(self.int_dtype)
+            # Conditionally create vector based on enable_dask flag
+            if hasattr(self, 'enable_dask') and self.enable_dask:
+                lod_vector = (fsca_data < fsca_max).astype(self.int_dtype)
+            else:
+                # Use numpy when dask is disabled
+                lod_vector = (fsca_data < fsca_max).astype(self.int_dtype)
+            
             filtered_array = fcs_array[lod_vector]
             print(f"Removed {max_events} events ({max_events/total_events:.2%}) at the limit of detection.")
         else:
-            lod_vector = da.ones(total_events, 
-                               chunks=fcs_array.chunks[0] if isinstance(fcs_array, da.Array) else self.chunk_size,
-                               dtype=self.int_dtype)
+            # Conditionally create ones array based on enable_dask flag
+            if hasattr(self, 'enable_dask') and self.enable_dask:
+                lod_vector = da.ones(total_events, 
+                                   chunks=fcs_array.chunks[0] if isinstance(fcs_array, da.Array) else self.chunk_size,
+                                   dtype=self.int_dtype)
+            else:
+                # Use numpy when dask is disabled
+                lod_vector = np.ones(total_events, dtype=self.int_dtype)
+            
             filtered_array = fcs_array
             print("Threshold events below limit of 1%. Retaining events.")
 
