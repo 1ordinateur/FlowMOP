@@ -13,6 +13,8 @@ from abc import ABC, abstractmethod
 from cpu.flowmop_utils import process_histogram, Peak  # Changed to relative import
 from cpu.flowmop_utils import normalize_timeseries_values, apply_spline_smoothing, calculate_mad_thresholds
 import matplotlib.pyplot as plt
+import logging
+from pathlib import Path
 
 class TimeGateStrategy(ABC):
     @abstractmethod
@@ -21,9 +23,38 @@ class TimeGateStrategy(ABC):
         pass
 
 class MADTimeGate(TimeGateStrategy):
+    """
+    Implements time gating using Median Absolute Deviation (MAD) to detect anomalies.
+    
+    This strategy analyzes time-dependent patterns in flow cytometry data using overlapping time bins
+    and MAD-based outlier detection with configurable smoothing factors.
+    
+    Supports multiple operational modes:
+    - 'positives': Detects positive peaks in each time bin and monitors their stability
+    - 'geomean': Calculates geometric mean of all fluorescence channels in each time bin
+    - 'positive_geomeans': Uses global thresholds to identify positive events, then tracks their geometric mean
+    - 'both': Combines 'positives' and 'geomean' approaches for maximum sensitivity
+    
+    Attributes:
+        remove_zeros (bool): Whether to remove zero values during processing
+        min_cells (int): Minimum number of cells required per bin
+        max_bins (int): Maximum number of bins to create
+        step (int): Step size for bin creation
+        mad_threshold (int): Number of MADs to use as threshold for outlier detection
+        peak_removal (float): Threshold for peak removal (fraction of maximum peak)
+        min_nr_bins_peakdetection (int): Minimum number of bins required for peak detection
+        histogram_smoothing (int): Smoothing window size for histograms
+        mad_method (str): Method for MAD calculation ('short', 'long', or 'all')
+        mad_smoothing (list): Smoothing factors for MAD calculation
+        enable_dask (bool): Whether to use Dask for parallel computation
+        fluor_mode (str): Mode for fluorescence analysis
+        enable_plots (bool): Whether to generate diagnostic plots
+        plots_dir (str): Directory to save diagnostic plots
+    """
     def __init__(self, remove_zeros=True, min_cells=150, max_bins=500, step=200, mad_threshold=6, 
                  peak_removal=1/3, min_nr_bins_peakdetection=5, histogram_smoothing=5, mad_method='all', 
-                 mad_smoothing=[0.1, 1.0], enable_dask=True, fluor_mode='positives'):
+                 mad_smoothing=[0.1, 1.0], enable_dask=True, fluor_mode='positives', enable_plots=False, 
+                 plots_dir="time_gate_plots"):
         self.remove_zeros = remove_zeros
         self.min_cells = min_cells
         self.max_bins = max_bins
@@ -36,7 +67,23 @@ class MADTimeGate(TimeGateStrategy):
         self.mad_smoothing = mad_smoothing
         self.plot_counter = 0
         self.enable_dask = enable_dask
-        self.fluor_mode = fluor_mode  # 'positives', 'geomean', or 'both'
+        self.fluor_mode = fluor_mode  # 'positives', 'geomean', 'positive_geomeans', or 'both'
+        self.enable_plots = enable_plots
+        self.plots_dir = plots_dir
+        self.current_marker = "Unknown"
+        
+        # Create plots directory if it doesn't exist
+        if self.enable_plots:
+            import os
+            os.makedirs(self.plots_dir, exist_ok=True)
+
+        # Configure logging
+        self.logger = logging.getLogger('MADTimeGate')
+        self.logger.setLevel(logging.DEBUG)
+        log_file = Path('log_file.log')
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        self.logger.addHandler(file_handler)
 
     def gate(self, data: np.ndarray, time_channel_index: int, marker_names: list) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -53,11 +100,9 @@ class MADTimeGate(TimeGateStrategy):
         # Calculate optimal number of events per bin
         events_per_bin = self._find_events_per_bin(data)
         breaks = self._make_breaks(events_per_bin, data.shape[0])
-        print(f"Number of time bins: {len(breaks)}")
-        
+
         # Find fluorescence channels
         fluoro_channels = self._get_fluorescence_channels(marker_names, time_channel_index)
-        
         # Initialize array to count how many channels reject each cell
         rejection_count = np.zeros(data.shape[0], dtype=int)
         
@@ -65,11 +110,14 @@ class MADTimeGate(TimeGateStrategy):
         if self.fluor_mode in ['positives', 'both']:
             rejection_count = self._process_positive_peaks(data, fluoro_channels, breaks['breaks'], 
                                                         marker_names, rejection_count)
-        
         if self.fluor_mode in ['geomean', 'both']:
             rejection_count = self._process_geometric_mean(data, fluoro_channels, breaks['breaks'], 
                                                         rejection_count)
-        
+        if self.fluor_mode == 'positive_geomeans':
+            rejection_count = self._process_positive_geomeans(data, fluoro_channels, breaks['breaks'], 
+                                                         marker_names, rejection_count)
+            
+        print("rejection count: ", rejection_count)
         # Create final gate vector based on mode
         time_gate_vector = self._create_final_gate(rejection_count)
         filtered_data = data[time_gate_vector]
@@ -78,9 +126,10 @@ class MADTimeGate(TimeGateStrategy):
 
     def _get_fluorescence_channels(self, marker_names: list, time_channel_index: int) -> List[int]:
         """Extract indices of fluorescence channels."""
+        excluded_terms = ['fsc', 'ssc', 'time', 'sample']
         return [i for i, name in enumerate(marker_names) 
                 if i != time_channel_index and 
-                not any(x.lower() in name.lower() for x in ['fsc', 'ssc', 'time'])]
+                not any(term in name.lower().replace('-','') for term in excluded_terms)]
 
     def _create_final_gate(self, rejection_count: np.ndarray) -> np.ndarray:
         """Create the final gate vector based on the fluor_mode."""
@@ -92,102 +141,73 @@ class MADTimeGate(TimeGateStrategy):
             return rejection_count < 1
 
     def _process_positive_peaks(self, data: np.ndarray, fluoro_channels: List[int], 
-                              breaks: List[np.ndarray], marker_names: list,
-                              rejection_count: np.ndarray) -> np.ndarray:
-        """Process data using positive peak detection method."""
+                          breaks: List[np.ndarray], marker_names: list,
+                          rejection_count: np.ndarray) -> np.ndarray:
+        """
+        Process data using the 'positive_peaks' method:
+        1. Find peaks for each fluorescence channel independently
+        2. Apply MAD thresholding to each channel's peak time series
+        
+        Args:
+            data: Flow cytometry data array
+            fluoro_channels: List of fluorescence channel indices
+            breaks: List of time bin indices
+            marker_names: List of marker names
+            rejection_count: Array counting rejections for each cell
+            
+        Returns:
+            Updated rejection_count array
+        """
+        self.logger.info("Processing using positive_peaks mode")
+        
+        # Dictionary to map channel indices to marker names
+        channel_to_marker = {channel: marker_names[channel] for channel in fluoro_channels}
+        
         # Determine thresholds for all channels
         thresholds = self._determine_thresholds_all_channels(data, fluoro_channels, breaks, marker_names)
         
-        # Apply MAD analysis based on processing method
+        if len(thresholds) == 0:
+            self.logger.warning("No valid peaks detected for any channel")
+            return rejection_count
+        
+        # Process peaks for each channel
         if self.enable_dask:
-            rejection_count = self._process_peaks_with_dask(thresholds, breaks, data.shape[0], rejection_count)
+            # Use Dask for parallel processing
+            rejection_count = self._process_peaks_with_dask(
+                thresholds, breaks, data.shape[0], rejection_count, channel_to_marker
+            )
         else:
-            rejection_count = self._process_peaks_without_dask(thresholds, breaks, data.shape[0], rejection_count)
-            
+            # Process sequentially
+            rejection_count = self._process_peaks_without_dask(
+                thresholds, breaks, data.shape[0], rejection_count, channel_to_marker
+            )
+        
         return rejection_count
 
     def _process_peaks_with_dask(self, thresholds: Dict, breaks: List[np.ndarray], 
-                               nr_cells: int, rejection_count: np.ndarray) -> np.ndarray:
+                               nr_cells: int, rejection_count: np.ndarray, channel_to_marker: Dict = None) -> np.ndarray:
         """Process peaks using Dask for parallel computation."""
-        import dask
+        for channel, channel_thresholds in thresholds.items():
+            if channel_to_marker:
+                self.current_marker = channel_to_marker.get(channel, f"Channel_{channel}")
+            
+            # Apply MAD analysis with Dask
+            rejected_cells = self._apply_mad_analysis(channel_thresholds, breaks, nr_cells, use_dask=True)
+            rejection_count[rejected_cells] += 1
         
-        delayed_tasks = []
-
-        for channel_thresholds in thresholds.values():
-            if self.mad_method == 'short':
-            # Short-term filtering only
-                smoothing_factor = self._get_smoothing_factor('short')
-                delayed_task = dask.delayed(self._mad_excluder)(
-                channel_thresholds, self.mad_threshold, breaks, 
-                nr_cells, smoothing_factor=smoothing_factor
-                    )
-                delayed_tasks.append((delayed_task, 'short'))
-            elif self.mad_method == 'long':
-            # Long-term filtering only
-                smoothing_factor = self._get_smoothing_factor('long')
-                delayed_task = dask.delayed(self._mad_excluder)(
-                channel_thresholds, self.mad_threshold, breaks, 
-                nr_cells, smoothing_factor=smoothing_factor
-                    )
-                delayed_tasks.append((delayed_task, 'long'))
-            else:  # 'all' - default
-                    # Both short and long-term filtering
-                short_smoothing = self._get_smoothing_factor('short')
-                long_smoothing = self._get_smoothing_factor('long')
-            
-                short_task = dask.delayed(self._mad_excluder)(
-                channel_thresholds, self.mad_threshold, breaks, 
-                nr_cells, smoothing_factor=short_smoothing
-                    )
-                long_task = dask.delayed(self._mad_excluder)(
-                channel_thresholds, self.mad_threshold, breaks, 
-                nr_cells, smoothing_factor=long_smoothing
-                    )
-                delayed_tasks.append(((short_task, long_task), 'all'))
-            
-        # Compute all tasks in parallel
-            results = dask.compute(*[task for task, _ in delayed_tasks])
-            
-            # Process results and update rejection_count
-            for i, (result, task_type) in enumerate(zip(results, [t_type for _, t_type in delayed_tasks])):
-                if task_type == 'short' or task_type == 'long':
-                    rejected_cells = ~result['cells']
-                else:  # 'all'
-                    short_result, long_result = result
-                    rejected_cells = ~(short_result['cells'] & long_result['cells'])
-                
-                rejection_count[rejected_cells] += 1
-
         return rejection_count
 
     def _process_peaks_without_dask(self, thresholds: Dict, breaks: List[np.ndarray], 
-                                  nr_cells: int, rejection_count: np.ndarray) -> np.ndarray:
+                                  nr_cells: int, rejection_count: np.ndarray,
+                                  channel_to_marker: Dict = None) -> np.ndarray:
         """Process peaks sequentially without Dask."""
-        for channel_thresholds in thresholds.values():
-            if self.mad_method == 'short':
-                # Short-term filtering only
-                smoothing_factor = self._get_smoothing_factor('short')
-                results = self._mad_excluder(channel_thresholds, self.mad_threshold, breaks, 
-                                          nr_cells, smoothing_factor=smoothing_factor)
-                rejected_cells = ~results['cells']
-            elif self.mad_method == 'long':
-                # Long-term filtering only
-                smoothing_factor = self._get_smoothing_factor('long')
-                results = self._mad_excluder(channel_thresholds, self.mad_threshold, breaks, 
-                                          nr_cells, smoothing_factor=smoothing_factor)
-                rejected_cells = ~results['cells']
-            else:  # 'all' - default
-                # Both short and long-term filtering
-                short_smoothing = self._get_smoothing_factor('short')
-                long_smoothing = self._get_smoothing_factor('long')
-                
-                short_results = self._mad_excluder(channel_thresholds, self.mad_threshold, breaks, 
-                                                nr_cells, smoothing_factor=short_smoothing)
-                long_results = self._mad_excluder(channel_thresholds, self.mad_threshold, breaks, 
-                                                nr_cells, smoothing_factor=long_smoothing)
-                rejected_cells = ~(short_results['cells'] & long_results['cells'])
+        for channel, channel_thresholds in thresholds.items():
+            if channel_to_marker:
+                self.current_marker = channel_to_marker.get(channel, f"Channel_{channel}")
             
-                rejection_count[rejected_cells] += 1
+            # Apply MAD analysis without Dask
+            rejected_cells = self._apply_mad_analysis(channel_thresholds, breaks, nr_cells, use_dask=False)
+            rejection_count[rejected_cells] += 1
         
         return rejection_count
 
@@ -209,79 +229,12 @@ class MADTimeGate(TimeGateStrategy):
     def _process_geomean_with_dask(self, geomean_results: np.ndarray, 
                                  breaks: List[np.ndarray], nr_cells: int) -> np.ndarray:
         """Process geometric mean using Dask for parallel computation."""
-        import dask
-        
-        if self.mad_method == 'short':
-            # Short-term filtering only
-            smoothing_factor = self._get_smoothing_factor('short')
-            task = dask.delayed(self._apply_geomean_mad)(
-                geomean_results, self.mad_threshold, breaks, 
-                nr_cells, smoothing_factor=smoothing_factor
-            )
-            result = dask.compute(task)[0]
-            rejected_cells = ~result['cells']
-        elif self.mad_method == 'long':
-            # Long-term filtering only
-            smoothing_factor = self._get_smoothing_factor('long')
-            task = dask.delayed(self._apply_geomean_mad)(
-                geomean_results, self.mad_threshold, breaks, 
-                nr_cells, smoothing_factor=smoothing_factor
-            )
-            result = dask.compute(task)[0]
-            rejected_cells = ~result['cells']
-        else:  # 'all' - default
-            # Both short and long-term filtering
-            short_smoothing = self._get_smoothing_factor('short')
-            long_smoothing = self._get_smoothing_factor('long')
-            
-            short_task = dask.delayed(self._apply_geomean_mad)(
-                geomean_results, self.mad_threshold, breaks, 
-                nr_cells, smoothing_factor=short_smoothing
-            )
-            long_task = dask.delayed(self._apply_geomean_mad)(
-                geomean_results, self.mad_threshold, breaks, 
-                nr_cells, smoothing_factor=long_smoothing
-            )
-            short_result, long_result = dask.compute(short_task, long_task)
-            rejected_cells = ~(short_result['cells'] & long_result['cells'])
-        
-        return rejected_cells
+        return self._apply_mad_analysis(geomean_results, breaks, nr_cells, use_dask=True)
 
     def _process_geomean_without_dask(self, geomean_results: np.ndarray, 
                                     breaks: List[np.ndarray], nr_cells: int) -> np.ndarray:
         """Process geometric mean sequentially without Dask."""
-        if self.mad_method == 'short':
-            # Short-term filtering only
-            smoothing_factor = self._get_smoothing_factor('short')
-            result = self._apply_geomean_mad(
-                geomean_results, self.mad_threshold, breaks, 
-                nr_cells, smoothing_factor=smoothing_factor
-            )
-            rejected_cells = ~result['cells']
-        elif self.mad_method == 'long':
-            # Long-term filtering only
-            smoothing_factor = self._get_smoothing_factor('long')
-            result = self._apply_geomean_mad(
-                geomean_results, self.mad_threshold, breaks, 
-                nr_cells, smoothing_factor=smoothing_factor
-            )
-            rejected_cells = ~result['cells']
-        else:  # 'all' - default
-            # Both short and long-term filtering
-            short_smoothing = self._get_smoothing_factor('short')
-            long_smoothing = self._get_smoothing_factor('long')
-            
-            short_result = self._apply_geomean_mad(
-                geomean_results, self.mad_threshold, breaks, 
-                nr_cells, smoothing_factor=short_smoothing
-            )
-            long_result = self._apply_geomean_mad(
-                geomean_results, self.mad_threshold, breaks, 
-                nr_cells, smoothing_factor=long_smoothing
-            )
-            rejected_cells = ~(short_result['cells'] & long_result['cells'])
-        
-        return rejected_cells
+        return self._apply_mad_analysis(geomean_results, breaks, nr_cells, use_dask=False)
 
     def _get_smoothing_factor(self, factor_type: str) -> float:
         """Get appropriate smoothing factor based on type ('short' or 'long')."""
@@ -312,8 +265,9 @@ class MADTimeGate(TimeGateStrategy):
         removed = self._removed_bins(breaks, to_remove_bins, nr_cells)
         contribution_mad = round((len(removed['cell_ids']) / nr_cells) * 100, 2)
         
-        # Optional debugging plot
-        # self._generate_mad_plot(peak_values, smoothed_peaks, to_remove_bins, smoothing_factor)
+        # Generate plot if enabled
+        if self.enable_plots:
+            self._generate_mad_plot(peak_values, smoothed_peaks, to_remove_bins, smoothing_factor)
         
         return {
             "cells": removed['cells'],
@@ -404,8 +358,9 @@ class MADTimeGate(TimeGateStrategy):
         removed = self._removed_bins(breaks, to_remove_bins, nr_cells)
         contribution_mad = round((len(removed['cell_ids']) / nr_cells) * 100, 2)
         
-        # Optional debugging plot
-        # self._generate_geomean_plot(values, smoothed_values, to_remove_bins, smoothing_factor)
+        # Generate plot if enabled
+        if self.enable_plots:
+            self._generate_geomean_plot(values, smoothed_values, to_remove_bins, smoothing_factor)
         
         return {
             "cells": removed['cells'],
@@ -446,7 +401,7 @@ class MADTimeGate(TimeGateStrategy):
         
         # Save the figure instead of displaying it
         self.plot_counter += 1
-        plt.savefig(f"mad_threshold_plot_{self.plot_counter}.png", dpi=300)
+        plt.savefig(f"{self.plots_dir}/mad_threshold_plot_{self.plot_counter}_{self.current_marker}.png", dpi=300)
         plt.close()
 
     def _generate_geomean_plot(self, values, smoothed_values, to_remove_bins, smoothing_factor):
@@ -476,7 +431,7 @@ class MADTimeGate(TimeGateStrategy):
         plt.tight_layout()
         
         self.plot_counter += 1
-        plt.savefig(f"geomean_mad_plot_{self.plot_counter}.png", dpi=300)
+        plt.savefig(f"{self.plots_dir}/geomean_mad_plot_{self.plot_counter}_{self.current_marker}.png", dpi=300)
         plt.close()
 
     def _find_events_per_bin(self, arr):
@@ -486,7 +441,6 @@ class MADTimeGate(TimeGateStrategy):
         # Try maximum number of bins first
         events_per_bin = int(np.ceil((nr_events / self.max_bins) * 2))
         events_per_bin = ((events_per_bin // self.step) * self.step) + self.step
-        
         # Create test bins
         test_breaks = self._split_with_overlap(np.arange(nr_events), events_per_bin, 
                                              int(np.ceil(events_per_bin / 2)))
@@ -521,24 +475,34 @@ class MADTimeGate(TimeGateStrategy):
         """
         threshold_frames = {}
         import dask
-        from dask import delayed
-        
-        # Create delayed tasks for each channel
-        delayed_results = {}
-        for channel in channels:
-            channel_data = data[:, channel]
-            marker_name = marker_names[channel]
-            # Create a delayed task for threshold determination
-            delayed_result = delayed(self._determine_all_thresholds)(channel_data, breaks, marker_name)
-            delayed_results[channel] = delayed_result
-        
-        # Compute all delayed tasks in parallel
-        computed_results = dask.compute(delayed_results)[0]
-        
-        # Filter out None results
-        for channel, result in computed_results.items():
-            if result is not None:
-                threshold_frames[channel] = result
+        # Process channels based on whether Dask is enabled
+        if self.enable_dask:
+            from dask import delayed
+            
+            # Create delayed tasks for each channel
+            delayed_results = {}
+            for channel in channels:
+                channel_data = data[:, channel]
+                marker_name = marker_names[channel]
+                # Create a delayed task for threshold determination
+                delayed_result = delayed(self._determine_all_thresholds)(channel_data, breaks, marker_name)
+                delayed_results[channel] = delayed_result
+            
+            # Compute all delayed tasks in parallel
+            computed_results = dask.compute(delayed_results)[0]
+            
+            # Filter out None results
+            for channel, result in computed_results.items():
+                if result is not None:
+                    threshold_frames[channel] = result
+        else:
+            # Sequential processing when Dask is disabled
+            for channel in channels:
+                channel_data = data[:, channel]
+                marker_name = marker_names[channel]
+                result = self._determine_all_thresholds(channel_data, breaks, marker_name)
+                if result is not None:
+                    threshold_frames[channel] = result
         
         return threshold_frames
 
@@ -574,10 +538,16 @@ class MADTimeGate(TimeGateStrategy):
         # Set negative values to zero
         processed_data[processed_data < 0] = 0
         
+        if len(processed_data) < 10:
+            self.logger.warning(f"Insufficient data after preprocessing ({len(processed_data)} events)")
+            return np.array([])
+        
         return processed_data
 
     def _determine_all_thresholds(self, channel_data, breaks, marker_name):
         """Determine peaks for a single channel."""
+        self.logger.info(f"Processing marker: {marker_name}")
+        
         # Preprocess the channel data
         processed_data = self._preprocess_channel_data(channel_data)
         
@@ -621,9 +591,11 @@ class MADTimeGate(TimeGateStrategy):
                 thresh = self._timegate_threshold_detection(break_data, 
                                                      smoothing=self.histogram_smoothing,
                                                      max_peak=positive_threshold)
+                if len(thresh) == 0:
+                    self.logger.warning(f"Empty thresholds for break {break_} in {marker_name}")
                 thresholds[break_] = thresh
             except Exception as e:
-                print(f"Warning: Error processing break {break_}: {str(e)}")
+                self.logger.error(f"Error processing break {break_} in {marker_name}: {str(e)}")
                 thresholds[break_] = np.array([])
         
         # Create array of thresholds and their time bins
@@ -657,9 +629,13 @@ class MADTimeGate(TimeGateStrategy):
         2. Above the peak_removal threshold relative to max fluoresent peak
         3. Have at least 10% prominence relative to surrounding minima if >2 peaks
         """
+        # Log the initial length of bin_data
+        initial_length = len(bin_data)
+        self.logger.debug(f"Initial bin_data length: {initial_length}")
         
         if self.remove_zeros:
             bin_data = bin_data[bin_data != 0]
+            self.logger.debug(f"After zero removal: {len(bin_data)} events (removed {initial_length - len(bin_data)})")
         
         # Use shared histogram processing function with class-level smoothing parameter if not overridden
         smoothing = smoothing if smoothing is not None else self.histogram_smoothing
@@ -674,10 +650,20 @@ class MADTimeGate(TimeGateStrategy):
         top_cutoff = max_val - (value_range * 0.01)     # Top 1%
         
         # Filter out values in the top and bottom 1% of the range
+        pre_filter_length = len(bin_data)
         bin_data = bin_data[(bin_data >= bottom_cutoff) & (bin_data <= top_cutoff)]
+        self.logger.debug(f"After range filtering: {len(bin_data)} events (removed {pre_filter_length - len(bin_data)})")
         
-        # Apply quantile filtering
-        q05, q95 = np.quantile(bin_data, [0.001, 0.999])
+        if len(bin_data) == 0:
+            self.logger.warning("Empty bin_data after filtering in threshold detection")
+            return np.array([])
+
+        try:
+            q05, q95 = np.quantile(bin_data, [0.001, 0.999])
+        except Exception as e:
+            self.logger.error(f"Quantile calculation failed: {str(e)}")
+            return np.array([])
+
         bin_data = bin_data[(bin_data >= q05) & (bin_data <= q95)]
         
         if len(bin_data) < 3:
@@ -750,6 +736,9 @@ class MADTimeGate(TimeGateStrategy):
         updated_threshold_frame = np.empty(len(thresholds), dtype=[('Bin', int), ('Threshold', float)])
             
         for i, (break_, threshold_list) in enumerate(thresholds.items()):
+            if len(threshold_list) == 0:
+                self.logger.debug(f"Skipping empty threshold list for break {break_}")
+                continue
             if isinstance(break_, int) and break_ < len(updated_threshold_frame):
                 if len(threshold_list) > 0:
                     closest_threshold_index = np.argmin(np.abs(threshold_list - most_occurring_thresholds))
@@ -776,7 +765,227 @@ class MADTimeGate(TimeGateStrategy):
     @staticmethod
     def _split_with_overlap(vec, seg_length, overlap):
         """Split vector into overlapping segments."""
+        print(f"Splitting vector into overlapping segments of length {seg_length} with overlap {overlap}")
         starts = np.arange(0, len(vec), seg_length - overlap)
         ends = starts + seg_length
         ends[ends > len(vec)] = len(vec)
         return [vec[start:end] for start, end in zip(starts, ends)]
+
+    def _calculate_bin_geomean(self, bin_idx: int, bin_indices: np.ndarray, 
+                           data: np.ndarray, valid_channels: List[int], 
+                           global_thresholds: Dict[int, float]) -> Dict[int, float]:
+        """
+        Calculate the geometric mean of positive cells for each channel in a given time bin.
+        
+        For each channel:
+        1. Identify positive cells (above channel-specific threshold)
+        2. Calculate geometric mean of those positive values
+        
+        Args:
+            bin_idx: Index of the current bin
+            bin_indices: Indices of cells in this bin
+            data: Flow cytometry data array
+            valid_channels: List of channel indices to use
+            global_thresholds: Dictionary mapping channel indices to their thresholds
+            
+        Returns:
+            Dictionary mapping channel indices to their geometric means for this bin
+            (channels with no valid data will be omitted)
+        """
+        if len(bin_indices) < self.min_cells:
+            self.logger.debug(f"Bin {bin_idx} has fewer than {self.min_cells} cells, skipping")
+            return {}
+        
+        # Get cells in this time bin
+        bin_data = data[bin_indices]
+        
+        # For each channel, extract positive cell values and calculate geometric mean
+        channel_geomeans = {}
+        
+        for channel in valid_channels:
+            channel_data = bin_data[:, channel]
+            threshold = global_thresholds[channel]
+            
+            # Get cells above threshold
+            positives = channel_data[channel_data > threshold]
+            
+            if len(positives) > 0:
+                # Calculate geometric mean for this channel
+                channel_geomean = np.exp(np.mean(np.log(positives + 1e-10)))
+                channel_geomeans[channel] = channel_geomean
+        
+        return channel_geomeans
+
+    def _process_positive_geomeans(self, data: np.ndarray, fluoro_channels: List[int], 
+                                 breaks: List[np.ndarray], marker_names: list,
+                                 rejection_count: np.ndarray) -> np.ndarray:
+        """
+        Process data using the 'positive_geomeans' method:
+        1. Determine global thresholds for each channel using existing infrastructure
+        2. For each time bin and channel, calculate geometric mean of cells above threshold
+        3. Apply MAD thresholding to each channel's time series independently
+        
+        Args:
+            data: Flow cytometry data array
+            fluoro_channels: List of fluorescence channel indices
+            breaks: List of time bin indices
+            marker_names: List of marker names
+            rejection_count: Array counting rejections for each cell
+            
+        Returns:
+            Updated rejection_count array
+        """
+        self.logger.info("Processing using positive_geomeans mode")
+        
+        # Get thresholds using existing method that already leverages Dask
+        threshold_frames = self._determine_thresholds_all_channels(data, fluoro_channels, breaks, marker_names)
+        
+        # Extract global thresholds from threshold frames
+        global_thresholds = {}
+        for channel, thresholds in threshold_frames.items():
+            if len(thresholds) > 0:
+                # Find the smallest threshold for this channel
+                global_threshold = np.min(thresholds['Threshold'])
+                
+                global_thresholds[channel] = global_threshold
+                self.logger.info(f"Global threshold for channel {channel} ({marker_names[channel]}): {global_threshold}")
+        
+        # Skip channels with no valid thresholds
+        valid_channels = [ch for ch in fluoro_channels if ch in global_thresholds]
+        
+        if len(valid_channels) == 0:
+            self.logger.warning("No valid thresholds detected for any channel")
+            return rejection_count
+        
+        # Dictionary to store geometric means for each channel across all bins
+        channel_geomean_values = {channel: [] for channel in valid_channels}
+        
+        # Calculate geometric means for each bin and channel
+        if self.enable_dask:
+            import dask
+            from dask import delayed
+            
+            # Create delayed tasks for each bin
+            delayed_tasks = [
+                delayed(self._calculate_bin_geomean)(bin_idx, bin_indices, data, valid_channels, global_thresholds)
+                for bin_idx, bin_indices in enumerate(breaks)
+            ]
+            
+            # Compute all tasks in parallel
+            bin_results = dask.compute(*delayed_tasks)
+            
+            # Organize results by channel
+            for bin_idx, bin_geomeans in enumerate(bin_results):
+                for channel, geomean in bin_geomeans.items():
+                    channel_geomean_values[channel].append((bin_idx, geomean))
+        else:
+            # Sequential processing for non-Dask mode
+            for bin_idx, bin_indices in enumerate(breaks):
+                bin_geomeans = self._calculate_bin_geomean(bin_idx, bin_indices, data, valid_channels, global_thresholds)
+                for channel, geomean in bin_geomeans.items():
+                    channel_geomean_values[channel].append((bin_idx, geomean))
+        
+        # Convert lists to structured arrays for MAD analysis
+        channel_thresholds = {}
+        for channel, values in channel_geomean_values.items():
+            if len(values) > 0:
+                # Convert to structured array
+                geomean_array = np.array(values, dtype=[('Bin', int), ('Threshold', float)])
+                channel_thresholds[channel] = geomean_array
+        
+        # Apply MAD analysis to each channel separately
+        for channel, geomean_values in channel_thresholds.items():
+            self.current_marker = f"{marker_names[channel]}_PositiveGeomean"  # For plot titles
+            rejected_cells = self._apply_mad_analysis(geomean_values, breaks, data.shape[0])
+            rejection_count[rejected_cells] += 1
+        
+        return rejection_count
+
+    def _apply_mad_analysis(self, geomean_values: np.ndarray, breaks: List[np.ndarray], 
+                           nr_cells: int, use_dask: bool = None) -> np.ndarray:
+        """
+        Apply MAD-based analysis with the configured method and smoothing factors.
+        
+        This is a common utility method that centralizes the MAD analysis logic
+        used across different processing functions.
+        
+        Args:
+            geomean_values: Structured array with bin indices and values
+            breaks: List of time bin indices
+            nr_cells: Total number of cells
+            use_dask: Whether to use Dask (if None, uses the class setting)
+            
+        Returns:
+            Boolean array indicating which cells were rejected (True = rejected)
+        """
+        # Default to class setting if not specified
+        if use_dask is None:
+            use_dask = self.enable_dask
+            
+        if self.mad_method == 'short':
+            # Short-term filtering only
+            smoothing_factor = self._get_smoothing_factor('short')
+            
+            if use_dask:
+                import dask
+                task = dask.delayed(self._apply_geomean_mad)(
+                    geomean_values, self.mad_threshold, breaks, 
+                    nr_cells, smoothing_factor=smoothing_factor
+                )
+                result = dask.compute(task)[0]
+            else:
+                result = self._apply_geomean_mad(
+                    geomean_values, self.mad_threshold, breaks, 
+                    nr_cells, smoothing_factor=smoothing_factor
+                )
+                
+            rejected_cells = ~result['cells']
+            
+        elif self.mad_method == 'long':
+            # Long-term filtering only
+            smoothing_factor = self._get_smoothing_factor('long')
+            
+            if use_dask:
+                import dask
+                task = dask.delayed(self._apply_geomean_mad)(
+                    geomean_values, self.mad_threshold, breaks, 
+                    nr_cells, smoothing_factor=smoothing_factor
+                )
+                result = dask.compute(task)[0]
+            else:
+                result = self._apply_geomean_mad(
+                    geomean_values, self.mad_threshold, breaks, 
+                    nr_cells, smoothing_factor=smoothing_factor
+                )
+                
+            rejected_cells = ~result['cells']
+            
+        else:  # 'all' - default
+            # Both short and long-term filtering
+            short_smoothing = self._get_smoothing_factor('short')
+            long_smoothing = self._get_smoothing_factor('long')
+            
+            if use_dask:
+                import dask
+                short_task = dask.delayed(self._apply_geomean_mad)(
+                    geomean_values, self.mad_threshold, breaks, 
+                    nr_cells, smoothing_factor=short_smoothing
+                )
+                long_task = dask.delayed(self._apply_geomean_mad)(
+                    geomean_values, self.mad_threshold, breaks, 
+                    nr_cells, smoothing_factor=long_smoothing
+                )
+                short_result, long_result = dask.compute(short_task, long_task)
+            else:
+                short_result = self._apply_geomean_mad(
+                    geomean_values, self.mad_threshold, breaks, 
+                    nr_cells, smoothing_factor=short_smoothing
+                )
+                long_result = self._apply_geomean_mad(
+                    geomean_values, self.mad_threshold, breaks, 
+                    nr_cells, smoothing_factor=long_smoothing
+                )
+            
+            rejected_cells = ~(short_result['cells'] & long_result['cells'])
+            
+        return rejected_cells

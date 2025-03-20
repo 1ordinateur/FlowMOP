@@ -38,7 +38,9 @@ class FlowMOP:
                  doublet_config: Optional[dict] = None,
                  enable_dask: bool = True,
                  chunk_size: Optional[int] = None,
-                 fluor_mode: str = 'positives'):
+                 fluor_mode: str = 'positives',
+                 enable_plots: bool = False,
+                 plots_dir: str = 'time_gate_plots'):
         """
         Initialize FlowMOP with configuration parameters.
         
@@ -65,6 +67,8 @@ class FlowMOP:
             enable_dask: Whether to use Dask for parallel computation
             chunk_size: Size of chunks for DASK array operations
             fluor_mode: Mode for fluorescence analysis ('positives', 'geomean', or 'both')
+            enable_plots: Whether to generate diagnostic plots during time gating
+            plots_dir: Directory to save time gate diagnostic plots
         """
         if enable_dask:
             self.chunk_size = chunk_size or 10000  # Default chunk size if none provided
@@ -86,7 +90,9 @@ class FlowMOP:
             'mad_smoothing': self.dtype(mad_smoothings),
             'mad_method': mad_method,
             'enable_dask': enable_dask,
-            'fluor_mode': fluor_mode
+            'fluor_mode': fluor_mode,
+            'enable_plots': enable_plots,
+            'plots_dir': plots_dir
         }
         
         debris_params = {
@@ -120,6 +126,8 @@ class FlowMOP:
         self.enable_dask = enable_dask
         self.fluor_mode = fluor_mode
         self._debug_info = {}
+        self.enable_plots = enable_plots
+        self.plots_dir = plots_dir
 
     def _process_array(self, data: ArrayType) -> da.Array:
         """Process array to ensure it's in the correct format for computations."""

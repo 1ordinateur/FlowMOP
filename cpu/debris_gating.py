@@ -219,7 +219,6 @@ class FSCDebrisGate(DebrisGateStrategy):
                 positive_fsc = data[positive_mask, fsc_column]
                 
                 # Define a function to process a single feature
-                @dask.delayed
                 def process_feature(feature_idx, pos_fsc, ref_peaks, window):
                     # Process histogram for this positive population
                     pos_result = process_histogram(pos_fsc, window)
@@ -262,19 +261,26 @@ class FSCDebrisGate(DebrisGateStrategy):
                         
                     return np.nan
                 
-                # Add the delayed computation for this feature
-                delayed_thresholds.append(process_feature(i, positive_fsc, all_fsc_peaks, self.smoothing_window))
+                # Add the computation for this feature - with or without Dask
+                if self.enable_dask:
+                    delayed_thresholds.append(dask.delayed(process_feature)(i, positive_fsc, all_fsc_peaks, self.smoothing_window))
+                else:
+                    threshold = process_feature(i, positive_fsc, all_fsc_peaks, self.smoothing_window)
+                    if not (isinstance(threshold, float) and np.isnan(threshold)):
+                        fsc_thresholds.append(threshold)
             else:
-                # For invalid features, add a placeholder
-                delayed_thresholds.append(dask.delayed(lambda: np.nan)())
+                # For invalid features, add a placeholder if using Dask
+                if self.enable_dask:
+                    delayed_thresholds.append(dask.delayed(lambda: np.nan)())
         
-        # Compute all thresholds in parallel
-        computed_thresholds = dask.compute(*delayed_thresholds)
+        # Compute all thresholds in parallel if using Dask
+        if self.enable_dask:
+            computed_thresholds = dask.compute(*delayed_thresholds)
+            # Filter out the valid thresholds (not NaN)
+            fsc_thresholds = [t for t in computed_thresholds if not (isinstance(t, float) and np.isnan(t))]
         
-        # Filter out the valid thresholds (not NaN)
-        fsc_thresholds = [t for t in computed_thresholds if not (isinstance(t, float) and np.isnan(t))]
         return fsc_thresholds
-
+    
 def detect_fluoropeaks(data: np.ndarray, marker_names: List[str], min_peaks: int = 2, max_peaks: int = 5, 
                          smoothing_window: int = 2, percentage_cells_present: float = 5, num_bins: int = 100) -> Tuple[np.ndarray, List[List[Peak]], List[np.ndarray]]:
     """Detect debris peaks in the data."""

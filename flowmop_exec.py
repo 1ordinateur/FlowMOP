@@ -30,18 +30,52 @@ def load_data(file_path: str) -> tuple:
     
     return meta, data
 
-def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'positives', mad_smoothing: list = None) -> None:
+def filter_numerical_columns(data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Filter DataFrame to keep only numerical columns.
+    
+    Args:
+        data: Input DataFrame with mixed column types
+        
+    Returns:
+        DataFrame with only numerical columns
+    """
+    # Get columns with numerical dtypes (int, float)
+    numerical_cols = data.select_dtypes(include=['number']).columns.tolist()
+    
+    if len(numerical_cols) == 0:
+        raise ValueError("No numerical columns found in the dataset. FlowMOP requires numerical data.")
+    
+    # If columns were filtered out, log information
+    if len(numerical_cols) < len(data.columns):
+        non_numerical = set(data.columns) - set(numerical_cols)
+        print(f"Filtered out {len(non_numerical)} non-numerical columns: {', '.join(non_numerical)}")
+    
+    return data[numerical_cols]
+
+def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'positives', 
+                mad_smoothing: list = None, enable_plots: bool = False, plots_dir: str = "time_gate_plots") -> None:
     """
     Process a data file through the FlowMOP pipeline.
     
     Args:
         file_path: Path to the data file (FCS or Parquet)
         output_dir: Directory to save output files (defaults to same as input)
-        fluor_mode: Mode for fluorescence analysis ('positives', 'geomean', or 'both')
+        fluor_mode: Mode for fluorescence analysis:
+            - 'positives': Detect positive peaks in each time bin
+            - 'geomean': Calculate geometric mean across all channels
+            - 'positive_geomeans': Use global thresholds and track geometric mean of positive cells
+            - 'both': Combine 'positives' and 'geomean' approaches
         mad_smoothing: List of smoothing factors for MAD-based time gating
+        enable_plots: Whether to generate time gate plots
+        plots_dir: Directory to save time gate plots
     """
     # Load data file
     meta, data = load_data(file_path)
+    
+    # Filter to keep only numerical columns
+    data = filter_numerical_columns(data)
+    print(f"Processing {len(data.columns)} numerical columns: {', '.join(data.columns)}")
     
     # Convert data to numpy array and get channel names
     fcs_array = data.values
@@ -56,19 +90,21 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
     
     # Set default mad_smoothing if not provided
     if mad_smoothing is None:
-        mad_smoothing = [0.1, 1.0]
+        mad_smoothing = [0.01, 1.0]
     
     # Initialize FlowMOP
     flowmop = flowmop_new.FlowMOP(
         time_channel_index=time_channel_index,
         remove_zeros=True,
-        min_cells=500,
-        max_bins=500,
+        min_cells=1000,
+        max_bins=600,
         step=200,
-        MAD=6,
-        enable_dask=False,
+        MAD=5,
+        enable_dask=True,
         fluor_mode=fluor_mode,
-        mad_smoothings=mad_smoothing
+        mad_smoothings=mad_smoothing,
+        enable_plots=enable_plots,
+        plots_dir=plots_dir
     )
     
     # Process the data
@@ -108,24 +144,26 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
         channel_names = output_df.columns.tolist()
         # Write to FCS file
         fcswrite.write_fcs(filename=str(fcs_output_file), 
-                           chn_names=channel_names,
-                           data=data)
+                          chn_names=channel_names,
+                          data=data)
         print(f"Data exported to FCS file: {fcs_output_file}")
-        flowmop.export_to_csv(str(output_file), fcs_array, marker_names, vectors)
 
 def main():
     parser = argparse.ArgumentParser(description='Process data files through FlowMOP pipeline')
     parser.add_argument('files', nargs='+', help='Path(s) to data file(s) to process (FCS or Parquet)')
     parser.add_argument('--output-dir', help='Directory to save output files')
-    parser.add_argument('--fluor-mode', choices=['positives', 'geomean', 'both'], default='positives',
+    parser.add_argument('--fluor-mode', choices=['positives', 'geomean', 'positive_geomeans', 'both'], default='positive_geomeans',
                         help='Mode for fluorescence anomaly detection (default: positives)')
-    parser.add_argument('--mad-smoothing', type=float, nargs='+', default=[0.1, 1.0],
-                        help='Smoothing factors for MAD-based time gating (default: 0.1 1.0)')
+    parser.add_argument('--mad-smoothing', type=float, nargs='+', default=[0.0, 1.0],
+                        help='Smoothing factors for MAD-based time gating (default: 0.0 1.0)')
+    parser.add_argument('--enable-plots', action='store_true', default=False, help='Generate time gate plots for each channel')
+    parser.add_argument('--plots-dir', type=str, default='time_gate_plots', help='Directory to save time gate plots')
     
     args = parser.parse_args()
     
     for file_path in args.files:
-        process_file(file_path, args.output_dir, args.fluor_mode, args.mad_smoothing)
+        process_file(file_path, args.output_dir, args.fluor_mode, args.mad_smoothing, 
+                    args.enable_plots, args.plots_dir)
 
 if __name__ == '__main__':
     main()

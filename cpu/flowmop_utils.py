@@ -128,7 +128,6 @@ def find_peaks(hist: np.ndarray, smoothing_window: int) -> np.ndarray:
     
     t1 = time.perf_counter()
     timings['prominence_filtering'] = t1 - t0
-    print(f"Peak finding timings: {timings}")
     return np.array(valid_peaks)
 
 def calculate_peak_densities(hist: np.ndarray, peak_indices: np.ndarray, 
