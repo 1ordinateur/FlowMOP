@@ -343,43 +343,55 @@ class InflectionDoubletGate(DoubletGateStrategy):
             else:
                 return data, np.ones(data.shape[0], dtype=np.int32)
                 
-        # Calculate aspect ratios
+        # Calculate aspect ratios for both FSC and SSC
         fsc_ratio, ssc_ratio = self._calculate_ratios(data, marker_names)
-        self._debug_info['ratios'] = {'fsc': fsc_ratio}
+        self._debug_info['ratios'] = {'fsc': fsc_ratio, 'ssc': ssc_ratio}
 
-        # Try inflection point method first
+        # Try inflection point method for both parameters
         inflection_success = False
-        fsc_threshold = None
+        fsc_threshold, ssc_threshold = None, None
 
-        # Step 2: Generate histogram starting from ratio = 1
+        # Generate histograms for both FSC and SSC ratios
         fsc_hist, fsc_bin_edges, fsc_peaks = self._generate_smooth_histogram(fsc_ratio)
-        self._debug_info['histograms'] = {'fsc': fsc_hist}
+        ssc_hist, ssc_bin_edges, ssc_peaks = self._generate_smooth_histogram(ssc_ratio)
+        self._debug_info['histograms'] = {'fsc': fsc_hist, 'ssc': ssc_hist}
 
-        # Step 3: Analyze histogram and find threshold
-        fsc_threshold, inflection_success = self._analyze_histogram_for_threshold(
+        # Analyze both histograms for thresholds
+        fsc_threshold, fsc_success = self._analyze_histogram_for_threshold(
             fsc_hist, fsc_bin_edges, fsc_peaks
         )
+        ssc_threshold, ssc_success = self._analyze_histogram_for_threshold(
+            ssc_hist, ssc_bin_edges, ssc_peaks
+        )
+        inflection_success = fsc_success and ssc_success
 
-        # Fall back to MAD-based thresholding if inflection method failed
+        # Fall back to MAD-based thresholding if either analysis fails
         if not inflection_success:
-            warnings.warn("Inflection point method failed to find threshold. Falling back to MAD-based thresholding.")
-            # Use MAD threshold calculation
+            warnings.warn("Inflection point method failed to find thresholds. Falling back to MAD-based thresholding.")
             mad_gate = MADDoubletGate(mad_threshold=self.fallback_mad_threshold)
             filtered_data, doublet_vector = mad_gate.gate(data, marker_names)
             
-            # Get the threshold that was used for plotting
-            if self.enable_dask and isinstance(fsc_ratio, da.Array):
-                valid_ratios = fsc_ratio[~da.isnan(fsc_ratio)].compute()
-            else:
-                valid_ratios = fsc_ratio[~np.isnan(fsc_ratio)]
+            # Get thresholds for both parameters for debugging
+            for ratio, name in zip([fsc_ratio, ssc_ratio], ['fsc', 'ssc']):
+                if self.enable_dask and isinstance(ratio, da.Array):
+                    valid_ratios = ratio[~da.isnan(ratio)].compute()
+                else:
+                    valid_ratios = ratio[~np.isnan(ratio)]
                 
-            fsc_threshold = np.median(valid_ratios) + self.fallback_mad_threshold * stats.median_abs_deviation(valid_ratios)
-            self._debug_info['thresholds'] = {'fsc': fsc_threshold}
+                self._debug_info['thresholds'][name] = (
+                    np.median(valid_ratios) + 
+                    self.fallback_mad_threshold * stats.median_abs_deviation(valid_ratios)
+                )
+            
             return filtered_data, doublet_vector
         else:
-            # Apply inflection-based threshold
-            filtered_data, doublet_vector = self._apply_inflection_threshold(data, fsc_ratio, fsc_threshold)
-            self._debug_info['thresholds'] = {'fsc': fsc_threshold}
+            # Apply combined inflection-based thresholds
+            filtered_data, doublet_vector = self._apply_inflection_threshold(
+                data, 
+                fsc_ratio, fsc_threshold,
+                ssc_ratio, ssc_threshold
+            )
+            self._debug_info['thresholds'] = {'fsc': fsc_threshold, 'ssc': ssc_threshold}
             return filtered_data, doublet_vector
 
     def _generate_smooth_histogram(self, data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
