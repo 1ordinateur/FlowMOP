@@ -54,7 +54,8 @@ def filter_numerical_columns(data: pd.DataFrame) -> pd.DataFrame:
     return data[numerical_cols]
 
 def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'positives', 
-                mad_smoothing: list = None, enable_plots: bool = False, plots_dir: str = "time_gate_plots") -> None:
+                mad_smoothing: list = None, enable_plots: bool = False, plots_dir: str = "time_gate_plots",
+                enable_ssc: bool = False, remove_beads: bool = False) -> None:
     """
     Process a data file through the FlowMOP pipeline.
     
@@ -69,6 +70,8 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
         mad_smoothing: List of smoothing factors for MAD-based time gating
         enable_plots: Whether to generate time gate plots
         plots_dir: Directory to save time gate plots
+        enable_ssc: Whether to use SSC-A for debris gating in addition to FSC-A
+        remove_beads: Whether to detect and remove beads based on SSC/FSC characteristics
     """
     # Load data file
     meta, data = load_data(file_path)
@@ -104,7 +107,9 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
         fluor_mode=fluor_mode,
         mad_smoothings=mad_smoothing,
         enable_plots=enable_plots,
-        plots_dir=plots_dir
+        plots_dir=plots_dir,
+        enable_ssc=enable_ssc,
+        remove_beads=remove_beads
     )
     
     # Process the data
@@ -158,12 +163,14 @@ def main():
                         help='Smoothing factors for MAD-based time gating (default: 0.0 1.0)')
     parser.add_argument('--enable-plots', action='store_true', default=False, help='Generate time gate plots for each channel')
     parser.add_argument('--plots-dir', type=str, default='time_gate_plots', help='Directory to save time gate plots')
+    parser.add_argument('--enable-ssc', action='store_true', default=False, help='Use SSC-A for debris gating in addition to FSC-A')
+    parser.add_argument('--remove-beads', action='store_true', default=False, help='Detect and remove beads based on SSC/FSC characteristics')
     
     args = parser.parse_args()
     
     for file_path in args.files:
         process_file(file_path, args.output_dir, args.fluor_mode, args.mad_smoothing, 
-                    args.enable_plots, args.plots_dir)
+                    args.enable_plots, args.plots_dir, args.enable_ssc, args.remove_beads)
 
 if __name__ == '__main__':
     main()

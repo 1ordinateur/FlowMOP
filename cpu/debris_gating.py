@@ -20,6 +20,8 @@ class DebrisGateResult:
     filtered_data: np.ndarray
     fsc_threshold: Optional[float]
     debris_vector: np.ndarray
+    ssc_threshold: Optional[float] = None
+    beads_threshold: Optional[float] = None
 
 class DebrisGateStrategy(ABC):
     @abstractmethod
@@ -28,7 +30,7 @@ class DebrisGateStrategy(ABC):
         pass
 
 class FSCDebrisGate(DebrisGateStrategy):
-    def __init__(self, min_peaks=2, max_peaks=5, smoothing_window=3, percentage_cells_present=5, num_bins=100, enable_dask=True, chunk_size=None):
+    def __init__(self, min_peaks=2, max_peaks=5, smoothing_window=3, percentage_cells_present=5, num_bins=100, enable_dask=True, chunk_size=None, enable_ssc=False, remove_beads=False):
         self.min_peaks = min_peaks
         self.max_peaks = max_peaks
         self.smoothing_window = smoothing_window
@@ -36,10 +38,12 @@ class FSCDebrisGate(DebrisGateStrategy):
         self.num_bins = num_bins
         self.enable_dask = enable_dask
         self.chunk_size = chunk_size
+        self.enable_ssc = enable_ssc
+        self.remove_beads = remove_beads
 
     def gate(self, data: np.ndarray, marker_names: list[str]) -> DebrisGateResult:
         """
-        Apply FSC-based debris gating to the data.
+        Apply debris gating to the data based on FSC-A and optionally SSC-A.
         
         Args:
             data: Flow cytometry data array
@@ -49,7 +53,7 @@ class FSCDebrisGate(DebrisGateStrategy):
             DebrisGateResult containing filtered data, threshold and debris vector
         """
         if not self._check_events_in_bottom_bin(data, marker_names):
-            return DebrisGateResult(filtered_data=data, fsc_threshold=None, debris_vector=np.ones(data.shape[0], dtype=int))
+            return DebrisGateResult(filtered_data=data, fsc_threshold=None, debris_vector=np.ones(data.shape[0], dtype=int), ssc_threshold=None, beads_threshold=None)
 
         # Set negative fluorescence values to 0
         data = np.where(data < 0, 0, data)
@@ -64,19 +68,65 @@ class FSCDebrisGate(DebrisGateStrategy):
             num_bins=self.num_bins
         )
 
+        # FSC gating (always performed)
         fsc_column = self._get_fsc_column(marker_names)
-        # Get FSC thresholds from valid peaks
         fsc_thresholds = self._get_fsc_thresholds(data, valid_peaks_mask, peaks_list, positive_masks, fsc_column)
 
         if not fsc_thresholds:
-            return DebrisGateResult(filtered_data=data, fsc_threshold=None, debris_vector=np.ones(data.shape[0], dtype=int))
+            return DebrisGateResult(filtered_data=data, fsc_threshold=None, debris_vector=np.ones(data.shape[0], dtype=int), ssc_threshold=None, beads_threshold=None)
 
-        # Calculate final threshold and apply gating
+        # Calculate FSC threshold and apply gating
         fsc_gate_threshold = np.nanmedian(fsc_thresholds)
         debris_vector = (data[:, fsc_column] >= fsc_gate_threshold).astype(int)
+        
+        # Default SSC threshold is None
+        ssc_gate_threshold = None
+        
+        # SSC gating (only if enabled)
+        if self.enable_ssc:
+            try:
+                ssc_column = self._get_ssc_column(marker_names)
+                # Use the generic method with SSC parameters
+                ssc_thresholds = self._get_ssc_thresholds(data, valid_peaks_mask, peaks_list, positive_masks, ssc_column)
+                
+                if ssc_thresholds:
+                    ssc_gate_threshold = np.nanmedian(ssc_thresholds)
+                    ssc_debris_vector = (data[:, ssc_column] >= ssc_gate_threshold).astype(int)
+                    
+                    # Combine FSC and SSC vectors with logical AND
+                    debris_vector = debris_vector & ssc_debris_vector
+            except ValueError as e:
+                warnings.warn(f"SSC gating failed: {str(e)}. Using only FSC gating.")
+        
+        # Bead removal (only if enabled and SSC is available)
+        beads_threshold = None
+        if self.remove_beads and self.enable_ssc:
+            try:
+                # Get FSC and SSC columns
+                fsc_column = self._get_fsc_column(marker_names)
+                ssc_column = self._get_ssc_column(marker_names)
+                
+                # Identify and remove beads
+                beads_vector, beads_threshold = self._identify_and_remove_beads(
+                    data, fsc_column, ssc_column
+                )
+                
+                # Update the debris vector to exclude beads
+                if beads_vector is not None:
+                    debris_vector = debris_vector & beads_vector
+            except ValueError as e:
+                warnings.warn(f"Bead removal failed: {str(e)}. Continuing without bead removal.")
+        
+        # Apply the debris vector to filter the data
         filtered_data = data[debris_vector == 1]
 
-        return DebrisGateResult(filtered_data=filtered_data, fsc_threshold=fsc_gate_threshold, debris_vector=debris_vector)
+        return DebrisGateResult(
+            filtered_data=filtered_data, 
+            fsc_threshold=fsc_gate_threshold, 
+            debris_vector=debris_vector,
+            ssc_threshold=ssc_gate_threshold,
+            beads_threshold=beads_threshold
+        )
 
     def _check_events_in_bottom_bin(self, fcs_array: np.ndarray, marker_names: list[str]) -> bool:
         """Check if events exist in the bottom 10th bin of FSC-A and SSC-A."""
@@ -112,6 +162,14 @@ class FSCDebrisGate(DebrisGateStrategy):
             return standardized_names.index('fsca')
         except ValueError:
             raise ValueError("FSC-A parameter not found in marker names.")
+            
+    def _get_ssc_column(self, marker_names: list[str]) -> int:
+        """Get the index of the SSC-A column."""
+        standardized_names = [standardize_marker_name(name) for name in marker_names]
+        try:
+            return standardized_names.index('ssca')
+        except ValueError:
+            raise ValueError("SSC-A parameter not found in marker names.")
 
     def _has_low_peak(self, bin_edges: np.ndarray, peak_indices: np.ndarray, 
                      lowest_reference_pos: float, base_tolerance: float = 1.3) -> bool:
@@ -180,10 +238,22 @@ class FSCDebrisGate(DebrisGateStrategy):
         
         return None
 
-    def _find_fsc_threshold(self, process_histogram_result: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], reference_peaks: List[Tuple[int, float]], 
-                          smoothing_window: int) -> Optional[float]:
-        """Find the FSC threshold by comparing peaks to reference peaks from all cells."""
-        # Get the lowest FSC peak position from reference
+    def _find_scatter_threshold(self, process_histogram_result: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], reference_peaks: List[Tuple[int, float]], 
+                             smoothing_window: int) -> Optional[float]:
+        """
+        Find a scatter threshold by comparing peaks to reference peaks from all cells.
+        
+        This is a generic method that works for both FSC and SSC thresholding.
+        
+        Args:
+            process_histogram_result: Results from processing the histogram
+            reference_peaks: List of reference peaks from the full dataset
+            smoothing_window: Window size for smoothing
+            
+        Returns:
+            Threshold value or None if no valid threshold could be determined
+        """
+        # Get the lowest peak position from reference
         lowest_reference_peak_pos = reference_peaks[0][1]
         smoothed_hist, pos_bin_edges, pos_peak_indices, peak_densities = process_histogram_result
         
@@ -194,21 +264,44 @@ class FSCDebrisGate(DebrisGateStrategy):
             
         # Use traditional max peak logic
         return self._get_max_peak_threshold(smoothed_hist, pos_bin_edges, pos_peak_indices, peak_densities, smoothing_window)
+    
+    def _find_fsc_threshold(self, process_histogram_result: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], reference_peaks: List[Tuple[int, float]], 
+                          smoothing_window: int) -> Optional[float]:
+        """Find the FSC threshold by comparing peaks to reference peaks from all cells."""
+        return self._find_scatter_threshold(process_histogram_result, reference_peaks, smoothing_window)
+        
+    def _find_ssc_threshold(self, process_histogram_result: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], reference_peaks: List[Tuple[int, float]], 
+                          smoothing_window: int) -> Optional[float]:
+        """Find the SSC threshold by comparing peaks to reference peaks from all cells."""
+        return self._find_scatter_threshold(process_histogram_result, reference_peaks, smoothing_window)
 
-    def _get_fsc_thresholds(self, data: np.ndarray, valid_peaks_mask: np.ndarray, 
-                           peaks_list: List[List[Peak]], positive_masks: List[np.ndarray],
-                           fsc_column: int) -> List[float]:
-        """Get FSC thresholds for features with valid peaks."""
-        # First get reference FSC peaks from all cells using process_histogram
-        result = process_histogram(data[:, fsc_column], self.smoothing_window)
+    def _get_scatter_thresholds(self, data: np.ndarray, valid_peaks_mask: np.ndarray, 
+                               peaks_list: List[List[Peak]], positive_masks: List[np.ndarray],
+                               scatter_column: int, scatter_type: str) -> List[float]:
+        """
+        Get scatter thresholds for features with valid peaks.
+        
+        Args:
+            data: Flow cytometry data array
+            valid_peaks_mask: Boolean mask indicating which features have valid peaks
+            peaks_list: List of peak objects for each feature
+            positive_masks: List of boolean masks indicating positive cells for each feature
+            scatter_column: Index of the scatter column (FSC-A or SSC-A)
+            scatter_type: Type of scatter parameter ('FSC-A' or 'SSC-A')
+            
+        Returns:
+            List of threshold values
+        """
+        # First get reference scatter peaks from all cells using process_histogram
+        result = process_histogram(data[:, scatter_column], self.smoothing_window)
         if result is None:
             return []
         
         smoothed_hist, bin_edges, ref_peak_indices, _ = result
-        all_fsc_peaks = [(idx, bin_edges[idx]) for idx in ref_peak_indices]
-        all_fsc_peaks = sorted(all_fsc_peaks, key=lambda x: x[1])
+        all_scatter_peaks = [(idx, bin_edges[idx]) for idx in ref_peak_indices]
+        all_scatter_peaks = sorted(all_scatter_peaks, key=lambda x: x[1])
         
-        fsc_thresholds = []
+        scatter_thresholds = []
 
         # For every feature, run through and check for peaks
         delayed_thresholds = []
@@ -216,15 +309,15 @@ class FSCDebrisGate(DebrisGateStrategy):
         for i, (is_valid, peaks, positive_mask) in enumerate(zip(valid_peaks_mask, peaks_list, positive_masks)):
             if is_valid and len(peaks) >= 2 and positive_mask is not None:
                 # Use the positive mask from detect_fluoropeaks
-                positive_fsc = data[positive_mask, fsc_column]
+                positive_scatter = data[positive_mask, scatter_column]
                 
                 # Define a function to process a single feature
-                def process_feature(feature_idx, pos_fsc, ref_peaks, window):
+                def process_feature(feature_idx, pos_scatter, ref_peaks, window):
                     # Process histogram for this positive population
-                    pos_result = process_histogram(pos_fsc, window)
+                    pos_result = process_histogram(pos_scatter, window)
                     if pos_result is not None:
-                        # Find FSC threshold using positive cells and reference peaks
-                        threshold = self._find_fsc_threshold(pos_result, ref_peaks, window)
+                        # Find threshold using the generic threshold finder
+                        threshold = self._find_scatter_threshold(pos_result, ref_peaks, window)
                         
                         if threshold is not None:
                             # Optional plotting
@@ -232,13 +325,13 @@ class FSCDebrisGate(DebrisGateStrategy):
                                 # Create a figure with two subplots side by side
                                 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
                                 
-                                # Plot 1: Full FSC Distribution
+                                # Plot 1: Full Distribution
                                 bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
                                 ax1.plot(bin_centers, smoothed_hist, 'b-', label='All Cells')
                                 ax1.plot(bin_centers[ref_peak_indices], smoothed_hist[ref_peak_indices], 'ro', label='Peaks')
-                                ax1.set_xlabel('FSC-A')
+                                ax1.set_xlabel(scatter_type)
                                 ax1.set_ylabel('Density')
-                                ax1.set_title('Full FSC Distribution')
+                                ax1.set_title(f'Full {scatter_type} Distribution')
                                 ax1.axvline(x=threshold, color='g', linestyle='--', label='Threshold')
                                 ax1.legend()
                                 
@@ -248,12 +341,12 @@ class FSCDebrisGate(DebrisGateStrategy):
                                 ax2.plot(pos_bin_centers, pos_hist, 'b-', label='Positive Cells')
                                 ax2.plot(pos_bin_centers[pos_peak_indices], pos_hist[pos_peak_indices], 'ro', label='Peaks')
                                 ax2.axvline(x=threshold, color='g', linestyle='--', label='Threshold')
-                                ax2.set_xlabel('FSC-A')
+                                ax2.set_xlabel(scatter_type)
                                 ax2.set_ylabel('Density')
-                                ax2.set_title('Positive Population FSC Distribution')
+                                ax2.set_title(f'Positive Population {scatter_type} Distribution')
                                 ax2.legend()
                                 
-                                plt.suptitle(f'FSC Distribution Analysis - Feature {feature_idx}')
+                                plt.suptitle(f'{scatter_type} Distribution Analysis - Feature {feature_idx}')
                                 plt.tight_layout()
                                 plt.show()
                             
@@ -263,11 +356,11 @@ class FSCDebrisGate(DebrisGateStrategy):
                 
                 # Add the computation for this feature - with or without Dask
                 if self.enable_dask:
-                    delayed_thresholds.append(dask.delayed(process_feature)(i, positive_fsc, all_fsc_peaks, self.smoothing_window))
+                    delayed_thresholds.append(dask.delayed(process_feature)(i, positive_scatter, all_scatter_peaks, self.smoothing_window))
                 else:
-                    threshold = process_feature(i, positive_fsc, all_fsc_peaks, self.smoothing_window)
+                    threshold = process_feature(i, positive_scatter, all_scatter_peaks, self.smoothing_window)
                     if not (isinstance(threshold, float) and np.isnan(threshold)):
-                        fsc_thresholds.append(threshold)
+                        scatter_thresholds.append(threshold)
             else:
                 # For invalid features, add a placeholder if using Dask
                 if self.enable_dask:
@@ -277,9 +370,125 @@ class FSCDebrisGate(DebrisGateStrategy):
         if self.enable_dask:
             computed_thresholds = dask.compute(*delayed_thresholds)
             # Filter out the valid thresholds (not NaN)
-            fsc_thresholds = [t for t in computed_thresholds if not (isinstance(t, float) and np.isnan(t))]
+            scatter_thresholds = [t for t in computed_thresholds if not (isinstance(t, float) and np.isnan(t))]
         
-        return fsc_thresholds
+        return scatter_thresholds
+        
+    def _get_fsc_thresholds(self, data: np.ndarray, valid_peaks_mask: np.ndarray, 
+                           peaks_list: List[List[Peak]], positive_masks: List[np.ndarray],
+                           fsc_column: int) -> List[float]:
+        """Get FSC thresholds for features with valid peaks."""
+        return self._get_scatter_thresholds(data, valid_peaks_mask, peaks_list, positive_masks, fsc_column, 'FSC-A')
+        
+    def _get_ssc_thresholds(self, data: np.ndarray, valid_peaks_mask: np.ndarray, 
+                           peaks_list: List[List[Peak]], positive_masks: List[np.ndarray],
+                           ssc_column: int) -> List[float]:
+        """Get SSC thresholds for features with valid peaks."""
+        return self._get_scatter_thresholds(data, valid_peaks_mask, peaks_list, positive_masks, ssc_column, 'SSC-A')
+        
+    def _identify_and_remove_beads(self, data: np.ndarray, fsc_column: int, ssc_column: int) -> Tuple[np.ndarray, float]:
+        """
+        Identify and remove beads based on SSC and FSC parameters.
+        
+        Beads typically have high SSC values but fall in the lower half of the FSC range.
+        This method:
+        1. Finds the largest peak in the SSC histogram
+        2. Creates a mask to remove events in this peak that are also in the bottom half of FSC
+        
+        Args:
+            data: Flow cytometry data array
+            fsc_column: Index of the FSC-A column
+            ssc_column: Index of the SSC-A column
+            
+        Returns:
+            Tuple of (beads_vector, beads_threshold) where:
+                - beads_vector is a boolean mask (True = keep, False = remove)
+                - beads_threshold is the SSC threshold used to identify beads
+        """
+        # Extract SSC data
+        ssc_data = data[:, ssc_column]
+        
+        # Process SSC histogram to find peaks
+        result = process_histogram(ssc_data, self.smoothing_window)
+        if result is None:
+            warnings.warn("Could not process SSC histogram for bead removal.")
+            return None, None
+            
+        smoothed_hist, bin_edges, peak_indices, peak_densities = result
+        
+        # If no peaks are found, return None
+        if len(peak_indices) == 0:
+            warnings.warn("No peaks found in SSC histogram for bead removal.")
+            return None, None
+            
+        # Find the largest peak by height
+        largest_peak_idx = peak_indices[np.argmax(peak_densities)]
+        largest_peak_pos = bin_edges[largest_peak_idx]
+        
+        # Calculate the threshold for beads (use the position of the largest peak)
+        beads_threshold = largest_peak_pos
+        
+        # Get FSC range and calculate the midpoint
+        fsc_data = data[:, fsc_column]
+        fsc_min = np.min(fsc_data)
+        fsc_max = np.max(fsc_data)
+        fsc_midpoint = fsc_min + (fsc_max - fsc_min) / 2
+        
+        # Create a mask to exclude:
+        # 1. Events with SSC values greater than or equal to the largest peak position
+        # 2. But only if they also have FSC values below the midpoint
+        beads_vector = ~((ssc_data >= beads_threshold) & (fsc_data < fsc_midpoint))
+        
+        # Optional visualization (disabled by default)
+        if False:
+            plt.figure(figsize=(12, 8))
+            
+            # Plot 1: SSC Histogram
+            plt.subplot(2, 2, 1)
+            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+            plt.plot(bin_centers, smoothed_hist, 'b-', label='SSC Distribution')
+            plt.plot(bin_centers[peak_indices], smoothed_hist[peak_indices], 'ro', label='Peaks')
+            plt.axvline(x=beads_threshold, color='g', linestyle='--', label='Beads Threshold')
+            plt.xlabel('SSC-A')
+            plt.ylabel('Density')
+            plt.title('SSC Distribution with Beads Threshold')
+            plt.legend()
+            
+            # Plot 2: FSC Histogram
+            plt.subplot(2, 2, 2)
+            plt.hist(fsc_data, bins=100, alpha=0.7, color='blue')
+            plt.axvline(x=fsc_midpoint, color='r', linestyle='--', label='FSC Midpoint')
+            plt.xlabel('FSC-A')
+            plt.ylabel('Count')
+            plt.title('FSC Distribution')
+            plt.legend()
+            
+            # Plot 3: Scatter plot of FSC vs SSC with beads highlighted
+            plt.subplot(2, 2, 3)
+            plt.scatter(fsc_data[beads_vector], ssc_data[beads_vector], alpha=0.1, color='blue', label='Kept Events')
+            plt.scatter(fsc_data[~beads_vector], ssc_data[~beads_vector], alpha=0.3, color='red', label='Removed Beads')
+            plt.axhline(y=beads_threshold, color='g', linestyle='--', label='Beads SSC Threshold')
+            plt.axvline(x=fsc_midpoint, color='r', linestyle='--', label='FSC Midpoint')
+            plt.xlabel('FSC-A')
+            plt.ylabel('SSC-A')
+            plt.title('FSC vs SSC with Beads Highlighted')
+            plt.legend()
+            
+            # Plot 4: Statistics
+            plt.subplot(2, 2, 4)
+            plt.text(0.1, 0.8, f"Total Events: {len(data)}", fontsize=12)
+            plt.text(0.1, 0.7, f"Beads Removed: {np.sum(~beads_vector)}", fontsize=12)
+            plt.text(0.1, 0.6, f"Percent Removed: {np.sum(~beads_vector)/len(data)*100:.2f}%", fontsize=12)
+            plt.text(0.1, 0.5, f"SSC Threshold: {beads_threshold:.2f}", fontsize=12)
+            plt.text(0.1, 0.4, f"FSC Midpoint: {fsc_midpoint:.2f}", fontsize=12)
+            plt.axis('off')
+            plt.title('Bead Removal Statistics')
+            
+            plt.tight_layout()
+            plt.savefig("beads_removal_analysis.png", dpi=300)
+            plt.close()
+        
+        return beads_vector, beads_threshold
     
 def detect_fluoropeaks(data: np.ndarray, marker_names: List[str], min_peaks: int = 2, max_peaks: int = 5, 
                          smoothing_window: int = 2, percentage_cells_present: float = 5, num_bins: int = 100) -> Tuple[np.ndarray, List[List[Peak]], List[np.ndarray]]:

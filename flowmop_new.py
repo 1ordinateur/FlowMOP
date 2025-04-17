@@ -40,7 +40,9 @@ class FlowMOP:
                  chunk_size: Optional[int] = None,
                  fluor_mode: str = 'positives',
                  enable_plots: bool = False,
-                 plots_dir: str = 'time_gate_plots'):
+                 plots_dir: str = 'time_gate_plots',
+                 enable_ssc: bool = False,
+                 remove_beads: bool = False):
         """
         Initialize FlowMOP with configuration parameters.
         
@@ -69,6 +71,8 @@ class FlowMOP:
             fluor_mode: Mode for fluorescence analysis ('positives', 'geomean', or 'both')
             enable_plots: Whether to generate diagnostic plots during time gating
             plots_dir: Directory to save time gate diagnostic plots
+            enable_ssc: Whether to use SSC-A for debris gating in addition to FSC-A
+            remove_beads: Whether to detect and remove beads based on SSC/FSC characteristics
         """
         if enable_dask:
             self.chunk_size = chunk_size or 10000  # Default chunk size if none provided
@@ -101,7 +105,9 @@ class FlowMOP:
             'smoothing_window': self.int_dtype(smoothing_window),
             'percentage_cells_present': self.dtype(percentage_cells_present),
             'num_bins': self.int_dtype(100),
-            'enable_dask': enable_dask
+            'enable_dask': enable_dask,
+            'enable_ssc': enable_ssc,
+            'remove_beads': remove_beads
         }
         
         # Configure gating strategies
