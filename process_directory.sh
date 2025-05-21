@@ -42,24 +42,36 @@ echo "Output directory set to: $OUTPUT_DIR"
 
 # Find and process .fcs and .parquet files
 # Using a nullglob to prevent errors if no files of a type are found
-shopt -s nullglob
+# Enable case-insensitive globbing for file extensions
+shopt -s nullglob nocaseglob
 for file_path in "$INPUT_DIR"/*.fcs "$INPUT_DIR"/*.parquet; do
     if [ -f "$file_path" ]; then
         echo "-----------------------------------------------------"
         echo "Processing file: $file_path"
-        # Construct the command
-        CMD="python src/flowmop_exec.py \"$file_path\" --output-dir \"$OUTPUT_DIR\""
+        
+        # Define the command and its initial arguments in an array
+        PY_COMMAND=(
+            python3
+            "$(dirname "$0")/flowmop_exec.py"
+            "$file_path"
+            --output-dir
+            "$OUTPUT_DIR"
+        )
+        
+        # Add any additional options from FLOWMOP_OPTIONS
         if [ ${#FLOWMOP_OPTIONS[@]} -gt 0 ]; then
-            CMD+=" ${FLOWMOP_OPTIONS[*]}"
+            PY_COMMAND+=("${FLOWMOP_OPTIONS[@]}")
         fi
         
-        echo "Executing: $CMD"
-        eval "$CMD" # Use eval to correctly handle options with spaces if any were to exist (though unlikely with argparse)
+        echo "Executing: ${PY_COMMAND[*]}" # Log the command for visibility
+        "${PY_COMMAND[@]}" # Execute the command
+        
         echo "Finished processing: $file_path"
         echo "-----------------------------------------------------"
     fi
 done
-shopt -u nullglob
+# Disable case-insensitive globbing
+shopt -u nullglob nocaseglob
 
 echo "All processing complete."
 echo "Output files are in: $OUTPUT_DIR" 
