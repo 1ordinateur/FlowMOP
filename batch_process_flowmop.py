@@ -25,17 +25,15 @@ from flowmop_exec import load_data, filter_numerical_columns
 def process_file(
     file_path: str,
     output_dir: str = None,
-    flowmop_instance: Optional[flowmop_new.FlowMOP] = None,
-    client: Optional[Client] = None
+    flowmop_params: dict = None
 ) -> Dict[str, Any]:
     """
-    Process a data file through the FlowMOP pipeline using an existing FlowMOP instance.
+    Process a data file through the FlowMOP pipeline.
     
     Args:
         file_path: Path to the data file (FCS or Parquet)
         output_dir: Directory to save output files (defaults to same as input)
-        flowmop_instance: Existing FlowMOP instance to reuse
-        client: Dask client for parallel processing
+        flowmop_params: Dictionary of parameters to create a FlowMOP instance
     
     Returns:
         Dictionary with processing stats and output file path
@@ -44,24 +42,12 @@ def process_file(
         print(f"\nProcessing {file_path}...")
         start_time = time.time()
         
-        # Clone the FlowMOP instance for thread safety
+        # Create a new FlowMOP instance with the provided parameters
         local_flowmop = flowmop_new.FlowMOP(
-            remove_zeros=flowmop_instance.remove_zeros if hasattr(flowmop_instance, 'remove_zeros') else True,
-            min_cells=flowmop_instance.min_cells if hasattr(flowmop_instance, 'min_cells') else 1000,
-            max_bins=flowmop_instance.max_bins if hasattr(flowmop_instance, 'max_bins') else 600,
-            step=flowmop_instance.step if hasattr(flowmop_instance, 'step') else 200,
-            MAD=flowmop_instance.MAD if hasattr(flowmop_instance, 'MAD') else 3,
-            fluor_mode=flowmop_instance.fluor_mode,
-            mad_smoothings=flowmop_instance.time_gate.mad_smoothing,
-            enable_plots=flowmop_instance.enable_plots,
-            plots_dir=flowmop_instance.plots_dir,
-            enable_ssc=flowmop_instance.debris_gate.enable_ssc,
-            remove_beads=flowmop_instance.debris_gate.remove_beads,
-            skip_debris=flowmop_instance.skip_debris_removal,
-            skip_time=flowmop_instance.skip_time_removal,
-            skip_doublets=flowmop_instance.skip_doublet_removal,
+            **flowmop_params,
             enable_dask=True,
-            existing_client=client
+            # Don't pass existing_client to avoid serialization issues
+            # The worker will have access to the distributed client automatically
         )
         
         # Load data file
@@ -81,8 +67,9 @@ def process_file(
                 time_channel_index = i
                 break
         
-        # Update the time channel index
-        local_flowmop.set_time_channel_index(time_channel_index)
+        # Set the time channel index if found
+        if time_channel_index is not None:
+            local_flowmop.set_time_channel_index(time_channel_index)
         
         # Process the data
         vectors = local_flowmop.process_fcs_data(marker_names, fcs_array)
@@ -246,27 +233,26 @@ def batch_process(
     print(f"Dask dashboard available at: {client.dashboard_link}")
     
     try:
-        # Initialize a single FlowMOP instance as a template
-        print("Initializing FlowMOP...")
-        flowmop_template = flowmop_new.FlowMOP(
-            time_channel_index=None,  # Will be set per file
-            remove_zeros=remove_zeros,
-            min_cells=min_cells,
-            max_bins=max_bins,
-            step=step_val,
-            MAD=mad_factor,
-            enable_dask=True,
-            fluor_mode=fluor_mode,
-            mad_smoothings=mad_smoothing,
-            enable_plots=enable_plots,
-            plots_dir=plots_dir,
-            enable_ssc=enable_ssc,
-            remove_beads=remove_beads,
-            skip_debris=skip_debris,
-            skip_time=skip_time,
-            skip_doublets=skip_doublets,
-            existing_client=client
-        )
+        # Create parameter dictionary instead of template instance
+        print("Preparing FlowMOP parameters...")
+        flowmop_params = {
+            'time_channel_index': None,  # Will be set per file
+            'remove_zeros': remove_zeros,
+            'min_cells': min_cells,
+            'max_bins': max_bins,
+            'step': step_val,
+            'MAD': mad_factor,
+            'fluor_mode': fluor_mode,
+            'mad_smoothings': mad_smoothing,
+            'enable_plots': enable_plots,
+            'plots_dir': plots_dir,
+            'enable_ssc': enable_ssc,
+            'remove_beads': remove_beads,
+            'skip_debris': skip_debris,
+            'skip_time': skip_time,
+            'skip_doublets': skip_doublets
+            # existing_client will be passed directly in process_file
+        }
         
         # Process files in parallel using Dask futures
         print(f"Processing {len(file_paths)} files with max {max_parallel_files} in parallel")
@@ -280,8 +266,9 @@ def batch_process(
                 process_file,
                 str(file_path),
                 output_dir,
-                flowmop_template,
-                client,
+                flowmop_params,
+                # Note: client is not passed here to avoid serialization issues,
+                # it will be available on the worker directly
                 # Ensure each future is tracked for progress reporting
                 key=f"process-{file_path.stem}"
             )
