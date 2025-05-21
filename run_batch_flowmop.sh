@@ -40,7 +40,7 @@ mkdir -p "$OUTPUT_DIR"
 echo "Output directory set to: $OUTPUT_DIR"
 
 # Construct the command
-CMD="python src/batch_process_flowmop.py \"$INPUT_DIR\" \"$OUTPUT_DIR\""
+CMD="python3 /g/data/eu59/FlowMOP/src/batch_process_flowmop.py \"$INPUT_DIR\" \"$OUTPUT_DIR\""
 if [ ${#BATCH_OPTIONS[@]} -gt 0 ]; then
     CMD+=" ${BATCH_OPTIONS[*]}"
 fi

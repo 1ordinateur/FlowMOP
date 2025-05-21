@@ -203,10 +203,12 @@ def batch_process(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Find all files matching the pattern
+    # Find all files matching the pattern (case insensitive)
     file_paths = []
     for pattern in [file_pattern, '*.parquet']:  # Support both FCS and parquet
-        file_paths.extend(list(input_path.glob(pattern)))
+        # Use rglob to search recursively and convert filenames to lowercase for comparison
+        matching_files = [f for f in input_path.rglob('*') if f.name.lower().endswith(pattern[1:].lower())]
+        file_paths.extend(matching_files)
     
     if not file_paths:
         print(f"No {file_pattern} or *.parquet files found in {input_dir}")

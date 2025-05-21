@@ -72,7 +72,7 @@ def generate_filtered_metadata(
 
     try:
         print(f"Reading metadata from: {metadata_csv}")
-        metadata_df = pd.read_csv(metadata_csv)
+        metadata_df = pd.read_csv(metadata_csv, delimiter=";")
     except FileNotFoundError:
         print(f"Error: Metadata file not found at {metadata_csv}")
         raise
