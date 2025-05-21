@@ -9,6 +9,7 @@ import numpy as np
 
 # Type definitions
 import dask.array as da
+from dask.distributed import Client
 ArrayType = Union[np.ndarray, da.Array]
 DEFAULT_ARRAY_MODULE = np
 
@@ -42,7 +43,11 @@ class FlowMOP:
                  enable_plots: bool = False,
                  plots_dir: str = 'time_gate_plots',
                  enable_ssc: bool = False,
-                 remove_beads: bool = False):
+                 remove_beads: bool = False,
+                 skip_debris: bool = False,
+                 skip_time: bool = False,
+                 skip_doublets: bool = False,
+                 existing_client: Optional[Client] = None):
         """
         Initialize FlowMOP with configuration parameters.
         
@@ -127,13 +132,15 @@ class FlowMOP:
             self.doublet_gate = MADDoubletGate(mad_threshold=mad)
             
         self.time_channel_index = time_channel_index
-        self.skip_doublet_removal = False
-        self.skip_debris_removal = False
+        self.skip_doublet_removal = skip_doublets
+        self.skip_debris_removal = skip_debris
+        self.skip_time_removal = skip_time
         self.enable_dask = enable_dask
         self.fluor_mode = fluor_mode
         self._debug_info = {}
         self.enable_plots = enable_plots
         self.plots_dir = plots_dir
+        self.existing_client = existing_client
 
     def _process_array(self, data: ArrayType) -> da.Array:
         """Process array to ensure it's in the correct format for computations."""
@@ -168,6 +175,19 @@ class FlowMOP:
         # Note: Individual gating operations may still compute internally
         # as they need immediate results for threshold calculations
         vectors = self._do_gating(fcs_array, vectors, marker_names)
+        
+        # Apply skipping logic for each filter type
+        if self.skip_debris_removal:
+            vectors['debris'] = ones.copy()  # Reset to all ones
+            print("Skipping debris filtering.")
+            
+        if self.skip_time_removal and self.time_channel_index is not None:
+            vectors['time'] = ones.copy()  # Reset to all ones
+            print("Skipping time filtering.")
+            
+        if self.skip_doublet_removal:
+            vectors['doublet'] = ones.copy()  # Reset to all ones
+            print("Skipping doublet filtering.")
 
         # Calculate final vector using DASK optimized operations
         if self.enable_dask:
@@ -180,7 +200,10 @@ class FlowMOP:
             ]), axis=0)
             
             # Persist intermediate results in memory
-            vectors['final'] = final_vector.compute()
+            if self.existing_client:
+                vectors['final'] = final_vector.compute(scheduler=self.existing_client)
+            else:
+                vectors['final'] = final_vector.compute()
         else:
             final_vector = vectors['lod']
             for key in ['debris', 'time', 'doublet']:
@@ -198,15 +221,18 @@ class FlowMOP:
             gates = {
                 'lod': dask.delayed(self.remove_limit_of_detection_events)(data, marker_names),
                 'time': dask.delayed(self.time_gate.gate)(data, self.time_channel_index, marker_names) 
-                    if self.time_channel_index else None,
+                    if self.time_channel_index and not self.skip_time_removal else None,
                 'debris': dask.delayed(self.debris_gate.gate)(data, marker_names) 
                     if not self.skip_debris_removal else None,
                 'doublet': dask.delayed(self.doublet_gate.gate)(data, marker_names) 
                     if not self.skip_doublet_removal else None
             }
 
-            # Compute independent gates in parallel
-            computed = dask.compute(gates)[0]
+            # Compute independent gates in parallel using existing client if provided
+            if self.existing_client:
+                computed = dask.compute(gates, scheduler=self.existing_client)[0]
+            else:
+                computed = dask.compute(gates)[0]
 
         else:
             # Execute gates sequentially without dask
@@ -215,7 +241,7 @@ class FlowMOP:
             # Run each gate operation
             computed['lod'] = self.remove_limit_of_detection_events(data, marker_names)
             
-            if self.time_channel_index:
+            if self.time_channel_index and not self.skip_time_removal:
                 computed['time'] = self.time_gate.gate(data, self.time_channel_index, marker_names)
             else:
                 computed['time'] = None
@@ -263,8 +289,12 @@ class FlowMOP:
         
         # Conditionally compute max and sum based on enable_dask flag
         if hasattr(self, 'enable_dask') and self.enable_dask:
-            fsca_max = da.max(fsca_data).compute()
-            max_events = da.sum(fsca_data == fsca_max).compute()
+            if hasattr(self, 'existing_client') and self.existing_client:
+                fsca_max = da.max(fsca_data).compute(scheduler=self.existing_client)
+                max_events = da.sum(fsca_data == fsca_max).compute(scheduler=self.existing_client)
+            else:
+                fsca_max = da.max(fsca_data).compute()
+                max_events = da.sum(fsca_data == fsca_max).compute()
         else:
             # Use numpy when dask is disabled
             fsca_max = np.max(fsca_data)
@@ -323,6 +353,23 @@ class FlowMOP:
 
         df.to_csv(output_file, index=False)
         print(f"Data exported to {output_file}")
+        
+    def set_skip_options(self, skip_debris: bool = None, skip_time: bool = None, skip_doublets: bool = None) -> None:
+        """Update skipping options for different gating steps."""
+        if skip_debris is not None:
+            self.skip_debris_removal = skip_debris
+        if skip_time is not None:
+            self.skip_time_removal = skip_time
+        if skip_doublets is not None:
+            self.skip_doublet_removal = skip_doublets
+            
+    def set_time_channel_index(self, time_channel_index: int) -> None:
+        """Update the time channel index."""
+        self.time_channel_index = time_channel_index
+        
+    def set_client(self, client: Client) -> None:
+        """Set an existing Dask client for computations."""
+        self.existing_client = client
 
     def get_debug_info(self) -> dict:
         """Get debugging information from the last pipeline run."""
