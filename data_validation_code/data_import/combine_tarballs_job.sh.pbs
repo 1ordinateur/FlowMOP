@@ -1,0 +1,14 @@
+#!/bin/bash
+
+#PBS -N combine_tarballs
+#PBS -l ncpus=16
+#PBS -l mem=48GB
+#PBS -l walltime=3:00:00
+#PBS -l jobfs=100GB
+#PBS -q expresssr
+#PBS -l wd
+#PBS -P eu59
+#PBS -l storage=gdata/eu59+gdata/dk92
+
+/g/data/eu59/FlowMOP/data/code/combine_tarballs.sh /g/data/eu59/FlowMOP/data/hu_dataset/fcs_files/ 
+echo "Done!"
