@@ -32,6 +32,7 @@ STEP_VAL=200
 MAD_FACTOR=3
 SKIP_PROCESSED=1
 VERBOSE=1
+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
 
 # Temporary directory for results
 TEMP_DIR=$(mktemp -d)
@@ -263,59 +264,54 @@ if [[ $VERBOSE -eq 0 ]]; then
 fi
 
 # Export environment variables for parallel
-export OUTPUT_DIR FLUOR_MODE MAD_SMOOTHING PLOTS_DIR MIN_CELLS MAX_BINS STEP_VAL MAD_FACTOR CMD_OPTIONS TEMP_DIR
+export OUTPUT_DIR FLUOR_MODE MAD_SMOOTHING PLOTS_DIR MIN_CELLS MAX_BINS STEP_VAL MAD_FACTOR CMD_OPTIONS TEMP_DIR WORKERS_PER_JOB SCRIPT_DIR
 
-# Function to process a single file
-process_file() {
-    local file=$1
-    local result_file="$TEMP_DIR/$(basename "$file").json"
-    
-    # Set thread environment variables with actual numeric values
-    export OMP_NUM_THREADS=$WORKERS_PER_JOB
-    export MKL_NUM_THREADS=$WORKERS_PER_JOB
-    export OPENBLAS_NUM_THREADS=$WORKERS_PER_JOB
-    export NUMEXPR_NUM_THREADS=$WORKERS_PER_JOB
-    
-    # Run python script with appropriate parameters
-    python3 -u /g/data/eu59/FlowMOP/src/flowmop_exec.py "$file" \
-        --output-dir "$OUTPUT_DIR" \
-        --fluor-mode "$FLUOR_MODE" \
-        --mad-smoothing $MAD_SMOOTHING \
-        --plots-dir "$PLOTS_DIR" \
-        --min-cells $MIN_CELLS \
-        --max-bins $MAX_BINS \
-        --step-val $STEP_VAL \
-        --mad-factor $MAD_FACTOR \
-        $CMD_OPTIONS
-    
-    local exit_code=$?
-    if [[ $exit_code -eq 0 ]]; then
-        echo "Completed: $file"
-    else
-        echo "Failed ($exit_code): $file"
-    fi
-}
+# Create a wrapper script that ensures environment variables are properly set
+cat > "$TEMP_DIR/process_wrapper.sh" <<EOF
+#!/bin/bash
+# Wrapper script to ensure environment variables are properly set
 
-export -f process_file
+# Get the file path from arguments
+file="\$1"
+
+# Set thread limits with numeric values (not empty strings)
+export OMP_NUM_THREADS=${WORKERS_PER_JOB}
+export MKL_NUM_THREADS=${WORKERS_PER_JOB}
+export OPENBLAS_NUM_THREADS=${WORKERS_PER_JOB}
+export NUMEXPR_NUM_THREADS=${WORKERS_PER_JOB}
+
+# Use absolute path for more reliable execution
+EXEC_PATH=\$(which python3 2>/dev/null || which python 2>/dev/null)
+
+# Run the Python script with appropriate parameters
+\$EXEC_PATH -u "${SCRIPT_DIR}/flowmop_exec.py" "\$file" \\
+    --output-dir "${OUTPUT_DIR}" \\
+    --fluor-mode "${FLUOR_MODE}" \\
+    --mad-smoothing ${MAD_SMOOTHING} \\
+    --plots-dir "${PLOTS_DIR}" \\
+    --min-cells ${MIN_CELLS} \\
+    --max-bins ${MAX_BINS} \\
+    --step-val ${STEP_VAL} \\
+    --mad-factor ${MAD_FACTOR} \\
+    ${CMD_OPTIONS}
+
+exit_code=\$?
+if [[ \$exit_code -eq 0 ]]; then
+    echo "Completed: \$file"
+else
+    echo "Failed (\$exit_code): \$file"
+fi
+EOF
+
+chmod +x "$TEMP_DIR/process_wrapper.sh"
 
 # Print processing information
 echo "Parallel processing ${#FILES[@]} files with max $MAX_PARALLEL simultaneous jobs"
 echo "Each FlowMOP instance will use $WORKERS_PER_JOB worker threads"
 echo "Output will be saved to $OUTPUT_DIR"
 
-# Export thread limit variables for parallel itself
-export PARALLEL_NUMEXPR_NUM_THREADS=$WORKERS_PER_JOB
-export PARALLEL_OMP_NUM_THREADS=$WORKERS_PER_JOB
-export PARALLEL_MKL_NUM_THREADS=$WORKERS_PER_JOB
-export PARALLEL_OPENBLAS_NUM_THREADS=$WORKERS_PER_JOB
-
-# Start parallel processing
-parallel --bar --jobs $MAX_PARALLEL \
-    --env NUMEXPR_NUM_THREADS \
-    --env OMP_NUM_THREADS \
-    --env MKL_NUM_THREADS \
-    --env OPENBLAS_NUM_THREADS \
-    process_file ::: "${FILES[@]}"
+# Start parallel processing with wrapper script
+parallel --bar --jobs $MAX_PARALLEL "$TEMP_DIR/process_wrapper.sh" ::: "${FILES[@]}"
 
 echo "Processing complete!"
 echo "Processed ${#FILES[@]} files"
