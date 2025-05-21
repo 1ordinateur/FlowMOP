@@ -189,9 +189,9 @@ SUMMARY_FILE="$OUTPUT_DIR/processing_summary.csv"
 # Find files to process
 if [[ "$FILE_PATTERN" == "*.fcs" ]]; then
     # Also include parquet files
-    FILES=( $(find "$INPUT_DIR" -type f \( -name "*.fcs" -o -name "*.parquet" \)) )
+    FILES=( $(find "$INPUT_DIR" -type f \( -iname "*.fcs" -o -iname "*.parquet" \)) )
 else
-    FILES=( $(find "$INPUT_DIR" -type f -name "$FILE_PATTERN") )
+    FILES=( $(find "$INPUT_DIR" -type f -iname "$FILE_PATTERN") )
 fi
 
 if [[ ${#FILES[@]} -eq 0 ]]; then
@@ -277,7 +277,7 @@ process_file() {
     export NUMEXPR_NUM_THREADS=$WORKERS_PER_JOB
     
     # Run python script with appropriate parameters
-    python -u src/flowmop_exec.py "$file" \
+    python3 -u /g/data/eu59/FlowMOP/src/flowmop_exec.py "$file" \
         --output-dir "$OUTPUT_DIR" \
         --fluor-mode "$FLUOR_MODE" \
         --mad-smoothing $MAD_SMOOTHING \
