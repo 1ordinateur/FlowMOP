@@ -370,19 +370,7 @@ class InflectionDoubletGate(DoubletGateStrategy):
             warnings.warn("Inflection point method failed to find thresholds. Falling back to MAD-based thresholding.")
             mad_gate = MADDoubletGate(mad_threshold=self.fallback_mad_threshold)
             filtered_data, doublet_vector = mad_gate.gate(data, marker_names)
-            
-            # Get thresholds for both parameters for debugging
-            for ratio, name in zip([fsc_ratio, ssc_ratio], ['fsc', 'ssc']):
-                if self.enable_dask and isinstance(ratio, da.Array):
-                    valid_ratios = ratio[~da.isnan(ratio)].compute()
-                else:
-                    valid_ratios = ratio[~np.isnan(ratio)]
-                
-                self._debug_info['thresholds'][name] = (
-                    np.median(valid_ratios) + 
-                    self.fallback_mad_threshold * stats.median_abs_deviation(valid_ratios)
-                )
-            
+                        
             return filtered_data, doublet_vector
         else:
             # Apply combined inflection-based thresholds

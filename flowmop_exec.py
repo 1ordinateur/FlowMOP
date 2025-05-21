@@ -199,7 +199,7 @@ def main():
     parser.add_argument('--min-cells', type=int, default=1000, help='Minimum number of cells required for processing a bin (default: 1000)')
     parser.add_argument('--max-bins', type=int, default=600, help='Maximum number of bins to divide data into (default: 600)')
     parser.add_argument('--step-val', type=int, default=200, help='Step size for binning (default: 200)')
-    parser.add_argument('--mad-factor', type=int, default=3, help='Factor for MAD calculation for gating (default: 3)')
+    parser.add_argument('--mad-factor', type=int, default=4, help='Factor for MAD calculation for gating (default: 4)')
     parser.add_argument('--disable-remove-zeros', action='store_false', dest='remove_zeros', help='Disable removal of zero values (zeros are removed by default)')
     parser.add_argument('--disable-dask', action='store_false', dest='enable_dask', help='Disable Dask for parallel processing (Dask is enabled by default)')
     parser.set_defaults(remove_zeros=True, enable_dask=True)
