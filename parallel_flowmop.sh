@@ -1,12 +1,10 @@
 #!/bin/bash
-# parallel_flowmop.sh - Parallel execution script for FlowMOP
+# parallel_flowmop.sh - Simple parallel execution script for FlowMOP
 # 
 # This script processes multiple FCS/parquet files in parallel using GNU Parallel
-# with 3 workers allocated per FlowMOP instance.
 #
 # Usage:
 #   ./parallel_flowmop.sh --input-dir /path/to/input --output-dir /path/to/output [OPTIONS]
-#
 
 set -e
 
@@ -14,8 +12,7 @@ set -e
 INPUT_DIR=""
 OUTPUT_DIR=""
 FILE_PATTERN="*.fcs"
-MAX_PARALLEL=4  # Maximum parallel processes
-WORKERS_PER_JOB=3  # Workers per FlowMOP instance
+MAX_PARALLEL=4
 FLUOR_MODE="positive_geomeans"
 MAD_SMOOTHING="0.1 0.9"
 ENABLE_PLOTS=0
@@ -31,18 +28,10 @@ MAX_BINS=600
 STEP_VAL=200
 MAD_FACTOR=3
 SKIP_PROCESSED=1
-VERBOSE=1
-SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
 
-# Temporary directory for results
-TEMP_DIR=$(mktemp -d)
-RESULTS_FILE="$TEMP_DIR/results.txt"
-SUMMARY_FILE=""
-
-# Check for GNU Parallel
+# Check if parallel is installed
 if ! command -v parallel &> /dev/null; then
     echo "Error: GNU Parallel is not installed. Please install it to use this script."
-    echo "Installation: apt-get install parallel or brew install parallel"
     exit 1
 fi
 
@@ -63,10 +52,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --max-parallel)
             MAX_PARALLEL="$2"
-            shift 2
-            ;;
-        --workers-per-job)
-            WORKERS_PER_JOB="$2"
             shift 2
             ;;
         --fluor-mode)
@@ -129,10 +114,6 @@ while [[ $# -gt 0 ]]; do
             SKIP_PROCESSED=0
             shift
             ;;
-        --quiet)
-            VERBOSE=0
-            shift
-            ;;
         --help)
             echo "Usage: $0 --input-dir <dir> --output-dir <dir> [OPTIONS]"
             echo ""
@@ -143,7 +124,6 @@ while [[ $# -gt 0 ]]; do
             echo "Optional arguments:"
             echo "  --file-pattern <pattern>  Glob pattern to match files (default: *.fcs)"
             echo "  --max-parallel <num>      Maximum number of parallel processes (default: 4)"
-            echo "  --workers-per-job <num>   Workers per FlowMOP instance (default: 3)"
             echo "  --fluor-mode <mode>       Mode for fluorescence analysis (default: positive_geomeans)"
             echo "                            Options: positives, geomean, positive_geomeans, both"
             echo "  --mad-smoothing <values>  Smoothing factors for MAD-based time gating (default: '0.1 0.9')"
@@ -154,14 +134,12 @@ while [[ $# -gt 0 ]]; do
             echo "  --skip-debris             Skip debris filtering"
             echo "  --skip-time               Skip time filtering"
             echo "  --skip-doublets           Skip doublet filtering"
-            echo "  --disable-remove-zeros    Disable removal of zero values"
+            echo "  --disable-remove-zeros    Disable removal of zero values (zeros are removed by default)"
             echo "  --min-cells <num>         Minimum number of cells required (default: 1000)"
             echo "  --max-bins <num>          Maximum number of bins (default: 600)"
             echo "  --step-val <num>          Step size for binning (default: 200)"
             echo "  --mad-factor <num>        Factor for MAD calculation (default: 3)"
             echo "  --no-skip-processed       Process all files, even if already processed"
-            echo "  --quiet                   Suppress progress output"
-            echo "  --help                    Display this help message"
             exit 0
             ;;
         *)
@@ -185,7 +163,6 @@ fi
 
 # Create output directory if it doesn't exist
 mkdir -p "$OUTPUT_DIR"
-SUMMARY_FILE="$OUTPUT_DIR/processing_summary.csv"
 
 # Find files to process
 if [[ "$FILE_PATTERN" == "*.fcs" ]]; then
@@ -237,7 +214,8 @@ if [[ $SKIP_PROCESSED -eq 1 ]]; then
 fi
 
 # Build command options
-CMD_OPTIONS=""
+CMD_OPTIONS="--output-dir $OUTPUT_DIR --fluor-mode $FLUOR_MODE --mad-smoothing $MAD_SMOOTHING --plots-dir $PLOTS_DIR --min-cells $MIN_CELLS --max-bins $MAX_BINS --step-val $STEP_VAL --mad-factor $MAD_FACTOR"
+
 if [[ $ENABLE_PLOTS -eq 1 ]]; then
     CMD_OPTIONS="$CMD_OPTIONS --enable-plots"
 fi
@@ -259,65 +237,20 @@ fi
 if [[ $REMOVE_ZEROS -eq 0 ]]; then
     CMD_OPTIONS="$CMD_OPTIONS --disable-remove-zeros"
 fi
-if [[ $VERBOSE -eq 0 ]]; then
-    CMD_OPTIONS="$CMD_OPTIONS --quiet"
-fi
 
-# Export environment variables for parallel
-export OUTPUT_DIR FLUOR_MODE MAD_SMOOTHING PLOTS_DIR MIN_CELLS MAX_BINS STEP_VAL MAD_FACTOR CMD_OPTIONS TEMP_DIR WORKERS_PER_JOB SCRIPT_DIR
-
-# Create a wrapper script that ensures environment variables are properly set
-cat > "$TEMP_DIR/process_wrapper.sh" <<EOF
-#!/bin/bash
-# Wrapper script to ensure environment variables are properly set
-
-# Get the file path from arguments
-file="\$1"
-
-# Set thread limits with numeric values (not empty strings)
-export OMP_NUM_THREADS=${WORKERS_PER_JOB}
-export MKL_NUM_THREADS=${WORKERS_PER_JOB}
-export OPENBLAS_NUM_THREADS=${WORKERS_PER_JOB}
-export NUMEXPR_NUM_THREADS=${WORKERS_PER_JOB}
-
-# Use absolute path for more reliable execution
-EXEC_PATH=\$(which python3 2>/dev/null || which python 2>/dev/null)
-
-# Run the Python script with appropriate parameters
-\$EXEC_PATH -u "${SCRIPT_DIR}/flowmop_exec.py" "\$file" \\
-    --output-dir "${OUTPUT_DIR}" \\
-    --fluor-mode "${FLUOR_MODE}" \\
-    --mad-smoothing ${MAD_SMOOTHING} \\
-    --plots-dir "${PLOTS_DIR}" \\
-    --min-cells ${MIN_CELLS} \\
-    --max-bins ${MAX_BINS} \\
-    --step-val ${STEP_VAL} \\
-    --mad-factor ${MAD_FACTOR} \\
-    ${CMD_OPTIONS}
-
-exit_code=\$?
-if [[ \$exit_code -eq 0 ]]; then
-    echo "Completed: \$file"
-else
-    echo "Failed (\$exit_code): \$file"
-fi
-EOF
-
-chmod +x "$TEMP_DIR/process_wrapper.sh"
+# Hardcode the path to flowmop_exec.py
+FLOWMOP_SCRIPT="/g/data/eu59/FlowMOP/src/flowmop_exec.py"
 
 # Print processing information
 echo "Parallel processing ${#FILES[@]} files with max $MAX_PARALLEL simultaneous jobs"
-echo "Each FlowMOP instance will use $WORKERS_PER_JOB worker threads"
 echo "Output will be saved to $OUTPUT_DIR"
 
-# Start parallel processing with wrapper script
-parallel --bar --jobs $MAX_PARALLEL "$TEMP_DIR/process_wrapper.sh" ::: "${FILES[@]}"
+# Run processes in parallel using GNU Parallel
+# Use python3 explicitly
+parallel --bar --jobs $MAX_PARALLEL python3 -u "$FLOWMOP_SCRIPT" {} $CMD_OPTIONS ::: "${FILES[@]}"
 
 echo "Processing complete!"
 echo "Processed ${#FILES[@]} files"
 echo "Output saved to $OUTPUT_DIR"
-
-# Clean up temporary directory
-rm -rf "$TEMP_DIR"
 
 exit 0
