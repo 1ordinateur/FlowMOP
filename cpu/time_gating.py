@@ -549,75 +549,80 @@ class MADTimeGate(TimeGateStrategy):
         
         # Preprocess the channel data
         processed_data = self._preprocess_channel_data(channel_data)
-        
-        # Use processed data for peak detection
-        full_channel_thresholds = self._timegate_threshold_detection(processed_data, smoothing=self.histogram_smoothing)
-        
-        # # Plot the full channel histogram and peaks
-        # result = flowmop_utils.process_histogram(processed_data, smoothing_window=self.histogram_smoothing, num_bins=100, filter_extremes=False)
-        # if result is not None:
-        #     smoothed_hist, bin_edges, peak_indices, peak_densities = result
-        #     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-            
-        #     plt.figure(figsize=(10, 6))
-        #     plt.hist(processed_data, bins=100, density=True, alpha=0.5, color='gray', label='Raw data')
-        #     plt.plot(bin_centers, smoothed_hist, 'b-', label='Smoothed histogram')
-        #     plt.plot(full_channel_peaks, np.interp(full_channel_peaks, bin_centers, smoothed_hist), 
-        #             'ro', label='Detected peaks')
-        #     plt.xlabel(f'{marker_name} Value')
-        #     plt.ylabel('Density')
-        #     plt.title(f'Full Channel Peak Detection - {marker_name}')
-        #     plt.legend()
-        #     plt.show()
-        
-        if np.all(np.isnan(full_channel_thresholds)):
+        if processed_data.size == 0: # Check if preprocessing resulted in empty data
+            self.logger.warning(f"Preprocessing resulted in empty data for marker: {marker_name}. Cannot determine thresholds.")
             return None
         
-        # Find threshold for positive peak across all data
-        positive_threshold = np.max(processed_data) * self.peak_removal
-        
-        # Process each time break - ensure indices are within bounds
-        channel_breaks = {}
+        # Step 1a: Collect initial thresholds for all time bins
+        initial_thresholds_dict = {}
         for i, break_indices in enumerate(breaks):
-            # Ensure indices are within bounds
+            # Ensure indices are within bounds of processed_data, not original channel_data
             valid_indices = break_indices[break_indices < len(processed_data)]
-            if len(valid_indices) > 0:  # Only process if we have valid indices
-                channel_breaks[i] = processed_data[valid_indices]
-        
-        thresholds = {}
-        for break_, break_data in channel_breaks.items():
-            try:
-                thresh = self._timegate_threshold_detection(break_data, 
-                                                     smoothing=self.histogram_smoothing,
-                                                     max_peak=positive_threshold)
-                if len(thresh) == 0:
-                    self.logger.warning(f"Empty thresholds for break {break_} in {marker_name}")
-                thresholds[break_] = thresh
-            except Exception as e:
-                self.logger.error(f"Error processing break {break_} in {marker_name}: {str(e)}")
-                thresholds[break_] = np.array([])
-        
-        # Create array of thresholds and their time bins
-        threshold_frame = np.array([(break_, thresh) for break_, thresh_list in thresholds.items() 
-                                  for thresh in thresh_list], dtype=[('Bin', int), ('Threshold', float)])
-        
-        # Remove any NaN thresholds
-        if np.any(np.isnan(threshold_frame['Threshold'])):
-            threshold_frame = threshold_frame[~np.isnan(threshold_frame['Threshold'])]
-            thresholds = {break_: thresh_list[~np.isnan(thresh_list)] 
-                         for break_, thresh_list in thresholds.items()}
+            if len(valid_indices) > 0:
+                bin_data_segment = processed_data[valid_indices]
+                # The max_peak argument for _timegate_threshold_detection can be set using a fraction of the overall processed_data's max value.
+                # This provides a consistent reference for peak filtering across bins.
+                overall_max_val = np.max(processed_data) if processed_data.size > 0 else None
+                adaptive_max_peak = overall_max_val * self.peak_removal if overall_max_val is not None and self.peak_removal is not None else None
+                
+                thresh_array = self._timegate_threshold_detection(bin_data_segment,
+                                                              smoothing=self.histogram_smoothing,
+                                                              max_peak=adaptive_max_peak)
+                initial_thresholds_dict[i] = thresh_array
+            else:
+                initial_thresholds_dict[i] = np.array([]) # No data for this bin
 
-        # Find representative thresholds across time bins
-        most_occurring_thresholds = self._find_most_occurring_thresholds(thresholds)  
-        if most_occurring_thresholds is None:
-            most_occurring_thresholds = np.median(threshold_frame['Threshold'])
-
-        # After finding representative thresholds across time bins, we need to update each bin's threshold
-        # assignments to match these representative values. This ensures consistent thresholding across
-        # the entire time series and reduces the impact of local variations or noise.
-        updated_threshold_frame = self._update_threshold_frame(thresholds, most_occurring_thresholds)  # Method name unchanged as it's outside selection
+        # Step 1b: Perform backward fill imputation
+        imputed_thresholds_dict = initial_thresholds_dict.copy()
+        # Ensure breaks are processed in order for correct backward fill
+        sorted_break_keys = sorted(imputed_thresholds_dict.keys(), reverse=True) # Iterate from last bin backwards
         
-        return updated_threshold_frame[updated_threshold_frame['Bin'] != -1]
+        last_valid_threshold = np.array([])
+        for break_key in sorted_break_keys:
+            if imputed_thresholds_dict[break_key].size == 0:
+                if last_valid_threshold.size > 0:
+                    imputed_thresholds_dict[break_key] = last_valid_threshold
+                    self.logger.debug(f"Imputed threshold for bin {break_key} with value from subsequent bin: {last_valid_threshold[0] if last_valid_threshold.size > 0 else 'N/A'}")
+            else:
+                last_valid_threshold = imputed_thresholds_dict[break_key]
+
+        # Step 1c: Collect all valid (non-empty) threshold values after imputation
+        all_valid_threshold_values = []
+        for break_key in sorted(imputed_thresholds_dict.keys()): # Process in original order for collection
+            thresh_arr = imputed_thresholds_dict[break_key]
+            if thresh_arr.size > 0:
+                all_valid_threshold_values.append(thresh_arr[0]) # Should be a single value
+        
+        if not all_valid_threshold_values:
+            self.logger.warning(f"No valid thresholds could be determined or imputed for any bin in marker: {marker_name}. Skipping this marker.")
+            return None
+
+        # Step 1d: Determine a single representative_threshold for the entire channel
+        representative_threshold = self._find_most_occurring_thresholds(imputed_thresholds_dict, tolerance=0.05)
+        if representative_threshold is None:
+            representative_threshold = np.median(all_valid_threshold_values)
+            self.logger.info(f"Used median of {len(all_valid_threshold_values)} values as representative threshold ({representative_threshold}) for {marker_name}.")
+        else:
+            self.logger.info(f"Used most occurring as representative threshold ({representative_threshold}) for {marker_name}.")
+
+        # Step 1e: Call _update_threshold_frame with the imputed dictionary and the representative threshold
+        # _update_threshold_frame will assign np.nan to bins that are still empty in imputed_thresholds_dict
+        threshold_frame = self._update_threshold_frame(imputed_thresholds_dict, representative_threshold)
+
+        # Step 1f: Filter the frame to remove any rows where the 'Threshold' is np.nan
+        final_frame = threshold_frame[~np.isnan(threshold_frame['Threshold'])]
+
+        # Step 1g: If this final_frame is empty, return None. Otherwise, apply existing filter.
+        if final_frame.size == 0:
+            self.logger.warning(f"No valid thresholds remaining after imputation and final filtering for marker: {marker_name}. Skipping this marker.")
+            return None
+        
+        # Original filter: return updated_threshold_frame[updated_threshold_frame['Bin'] != -1]
+        # The Bin != -1 filter is less critical now if NaNs are handled, but let's keep it for consistency if _update_threshold_frame can still produce -1 bins.
+        # However, since we initialize with (-1, np.nan) and then populate, bins that are NOT updated would have bin=-1 and threshold=nan.
+        # The ~np.isnan filter already handles the threshold part. If a bin truly had index -1, it would be problematic.
+        # Assuming bin indices are always >=0 from `breaks`.
+        return final_frame
 
     def _timegate_threshold_detection(self, bin_data, smoothing=None, max_peak=None, window_size=2):
         """
@@ -671,45 +676,84 @@ class MADTimeGate(TimeGateStrategy):
         result = process_histogram(bin_data, smoothing_window=smoothing, num_bins=100)
         
         if result is None:
+            self.logger.warning(f"Histogram processing failed for {self.current_marker}. Cannot determine timegate threshold.")
             return np.array([])
             
         smoothed_hist, bin_edges, peak_indices, peak_densities = result
-
         peak_indices = np.array(peak_indices, dtype=int)
+
+        if peak_indices.size == 0:
+            self.logger.warning(f"No peaks identified in histogram for {self.current_marker} by process_histogram. Cannot determine threshold in _timegate_threshold_detection.")
+            return np.array([])
+
+        # At this point, peak_indices.size > 0 is guaranteed.
+        # effective_peak_comparison_value is used for the single-peak filtering.
+        # It's either the max_peak (arg, an X-threshold) or a calculated Y-height if max_peak (arg) was None.
+        effective_peak_comparison_value = max_peak # max_peak is the function argument
         if max_peak is None:
-            max_peak = np.max(smoothed_hist[peak_indices])
+            effective_peak_comparison_value = np.max(smoothed_hist[peak_indices])
         
-        # Filter peaks based on threshold
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-        peak_values = bin_centers[peak_indices]
+        peak_x_values = bin_centers[peak_indices]
         
-        # If only 1 peak detected, use threshold filtering
+        threshold_determining_indices = np.array([], dtype=int)
+
         if len(peak_indices) == 1:
-            peak_mask = peak_values > (self.peak_removal * max_peak)
-            threshold_positive_index = peak_indices[peak_mask]
-
-        # If multiple peaks, find lowest point between first and last peak
-        else:
-            first_peak_idx = peak_indices[0]
-            last_peak_idx = peak_indices[-1]
-            valley_region = smoothed_hist[first_peak_idx:last_peak_idx]
-            # Find all points that match the minimum value
-            min_value = np.min(valley_region)
-            min_indices = np.where(valley_region == min_value)[0]
-            # Take the middle minimum point
-            middle_idx = int(len(min_indices) // 2)
-            lowest_point_idx = first_peak_idx + min_indices[middle_idx]
-            threshold = bin_centers[lowest_point_idx]
-            # Find peaks above the threshold
-            peaks_above_threshold = peak_indices[bin_centers[peak_indices] > threshold]
-            if len(peaks_above_threshold) > 0:
-                # Take average of peaks above threshold
-                threshold_positive_index = np.array([int(np.mean(peaks_above_threshold))])
+            if effective_peak_comparison_value is not None and self.peak_removal is not None:
+                # This comparison can be X > fraction*Y or X > fraction*X, depending on how effective_peak_comparison_value was set.
+                # This is a known complexity from the original logic.
+                mask = peak_x_values > (self.peak_removal * effective_peak_comparison_value)
+                threshold_determining_indices = peak_indices[mask]
+            else: # Not enough info for filtering, keep the single peak
+                threshold_determining_indices = peak_indices
+        else: # len(peak_indices) > 1
+            first_pidx = peak_indices[0]
+            last_pidx = peak_indices[-1]
+            
+            if first_pidx >= last_pidx: 
+                self.logger.warning(f"Peak indices misordered or duplicated ({first_pidx} >= {last_pidx}) for multi-peak logic in {self.current_marker}. Attempting fallback.")
+                # Fallback to single-peak style logic using effective_peak_comparison_value if available
+                if effective_peak_comparison_value is not None and self.peak_removal is not None:
+                    mask = peak_x_values > (self.peak_removal * effective_peak_comparison_value)
+                    threshold_determining_indices = peak_indices[mask]
+                else: # If no fallback possible, use the first peak
+                    threshold_determining_indices = np.array([first_pidx], dtype=int) if peak_indices.size > 0 else np.array([], dtype=int)
             else:
-                # Fallback to lowest point if no peaks above threshold
-                threshold_positive_index = np.array([lowest_point_idx])
+                valley_hist_segment = smoothed_hist[first_pidx:last_pidx] 
+                if valley_hist_segment.size == 0:
+                    # This occurs if first_pidx and last_pidx are adjacent (e.g., hist[5:5] for peaks at 5 and 6, means last_pidx should be exclusive for segment *between*)
+                    # If segment is truly between, like first_pidx+1 : last_pidx.
+                    # Original code implies hist[first_pidx] is part of valley search if first_pidx and last_pidx are adjacent.
+                    # Let's assume if size is 0 here, it's an issue (e.g. first_pidx == last_pidx-1 implies size 1 if slice is [first:last]).
+                    # This specific condition (size 0 for first_pidx:last_pidx) means first_pidx == last_pidx, which shouldn't happen here.
+                    self.logger.warning(f"Valley segment calculation error or unexpected empty segment ({first_pidx}:{last_pidx}) for multi-peak logic in {self.current_marker}. Using first peak as fallback.")
+                    threshold_determining_indices = np.array([first_pidx], dtype=int)
+                else:
+                    min_hist_val_in_valley = np.min(valley_hist_segment)
+                    relative_indices_of_min = np.where(valley_hist_segment == min_hist_val_in_valley)[0]
+                    mid_relative_idx = relative_indices_of_min[len(relative_indices_of_min) // 2]
+                    valley_bottom_hist_idx = first_pidx + mid_relative_idx
+                    
+                    valley_x_pos = bin_centers[valley_bottom_hist_idx]
+                    
+                    peaks_to_average = peak_indices[peak_x_values > valley_x_pos]
+                    
+                    if peaks_to_average.size > 0:
+                        avg_idx = int(np.mean(peaks_to_average))
+                        threshold_determining_indices = np.array([avg_idx], dtype=int)
+                    else:
+                        threshold_determining_indices = np.array([valley_bottom_hist_idx], dtype=int)
 
-        return bin_centers[threshold_positive_index]
+        if threshold_determining_indices.size > 0:
+            final_selected_hist_idx = threshold_determining_indices[0] 
+            if 0 <= final_selected_hist_idx < len(bin_centers):
+                return np.array([bin_centers[final_selected_hist_idx]]) 
+            else:
+                self.logger.warning(f"Final selected histogram index {final_selected_hist_idx} out of bounds for bin_centers (len {len(bin_centers)}) in {self.current_marker}.")
+                return np.array([])
+        else:
+            self.logger.debug(f"No threshold-determining peak index found for {self.current_marker} after applying logic.")
+            return np.array([])
 
     def _find_most_occurring_thresholds(self, thresholds, tolerance=0.05):
         """Find the most frequently occurring peaks."""
@@ -732,20 +776,48 @@ class MADTimeGate(TimeGateStrategy):
 
     def _update_threshold_frame(self, thresholds, most_occurring_thresholds):
         """Update threshold frame with closest thresholds to the most occurring thresholds."""
-        updated_threshold_frame = np.empty(len(thresholds), dtype=[('Bin', int), ('Threshold', float)])
-            
-        for i, (break_, threshold_list) in enumerate(thresholds.items()):
-            if len(threshold_list) == 0:
-                self.logger.debug(f"Skipping empty threshold list for break {break_}")
+        # Initialize with Bin = -1 and Threshold = np.nan to handle cases where bins might not be updated.
+        num_elements = len(thresholds)
+        updated_threshold_frame = np.empty(num_elements, dtype=[('Bin', int), ('Threshold', float)])
+        if num_elements > 0: # Avoid assignment to empty array fields if num_elements is 0
+            updated_threshold_frame['Bin'] = -1
+            updated_threshold_frame['Threshold'] = np.nan
+        
+        # Ensure thresholds keys are sorted for consistent processing, assuming keys are bin indices 0, 1, ... N-1
+        sorted_break_indices = sorted(thresholds.keys())
+
+        for i, break_ in enumerate(sorted_break_indices):
+            threshold_list = thresholds[break_]
+
+            if not isinstance(break_, int):
+                self.logger.warning(f"Invalid break index type: {break_} (value: {threshold_list}). Skipping this entry in _update_threshold_frame.")
+                # The entry in updated_threshold_frame for this 'i' will remain (-1, np.nan)
                 continue
-            if isinstance(break_, int) and break_ < len(updated_threshold_frame):
-                if len(threshold_list) > 0:
-                    closest_threshold_index = np.argmin(np.abs(threshold_list - most_occurring_thresholds))
-                    updated_threshold_frame[i] = (break_, threshold_list[closest_threshold_index])
-                else:
-                    updated_threshold_frame[i] = (break_, np.nan)
+
+            if threshold_list.size == 0:
+                self.logger.debug(f"Empty threshold list for break {break_} after imputation. Marking as NaN.")
+                updated_threshold_frame[i] = (break_, np.nan)
+            elif most_occurring_thresholds is None:
+                self.logger.warning(f"most_occurring_thresholds is None for break {break_}. Cannot update frame. Marking as NaN.")
+                updated_threshold_frame[i] = (break_, np.nan)
             else:
-                updated_threshold_frame[i] = (-1, np.nan)
+                # threshold_list should contain a single value after imputation and prior processing.
+                if threshold_list.size == 1:
+                    # Find the single threshold value that is closest to the most_occurring_thresholds value.
+                    # Since threshold_list has one item, it is trivially the closest to any single reference value.
+                    # We effectively snap this bin's threshold to be *one of* the representative values if it's a list,
+                    # or just use the single imputed value if we want to preserve it before a global snap.
+                    # The original logic was to pick from threshold_list based on most_occurring_thresholds.
+                    # If most_occurring_thresholds is a single float, and threshold_list is np.array([val]), then closest is val.
+                    closest_threshold_value = threshold_list[0] # Directly use the (imputed) value
+                    updated_threshold_frame[i] = (break_, closest_threshold_value)
+                else:
+                    # This case should ideally not happen if _timegate_threshold_detection returns single value or empty
+                    self.logger.warning(f"Threshold list for break {break_} has unexpected size {threshold_list.size} in _update_threshold_frame. Using first value if available, else NaN.")
+                    if threshold_list.size > 0:
+                        updated_threshold_frame[i] = (break_, threshold_list[0])
+                    else: # Should be caught by initial threshold_list.size == 0
+                        updated_threshold_frame[i] = (break_, np.nan)
         
         return updated_threshold_frame
 
