@@ -253,9 +253,16 @@ class FSCDebrisGate(DebrisGateStrategy):
         Returns:
             Threshold value or None if no valid threshold could be determined
         """
+        smoothed_hist, pos_bin_edges, pos_peak_indices, peak_densities = process_histogram_result
+        
+        # If there are no peaks in the positive population's histogram, 
+        # or no reference peaks from the global population for comparison,
+        # a threshold cannot be reliably determined by this method.
+        if len(pos_peak_indices) == 0 or len(reference_peaks) == 0:
+            return None
+            
         # Get the lowest peak position from reference
         lowest_reference_peak_pos = reference_peaks[0][1]
-        smoothed_hist, pos_bin_edges, pos_peak_indices, peak_densities = process_histogram_result
         
         # Check if we have any peaks near or below the reference lowest peak
         if not self._has_low_peak(pos_bin_edges, pos_peak_indices, lowest_reference_peak_pos):
@@ -513,7 +520,6 @@ def detect_fluoropeaks(data: np.ndarray, marker_names: List[str], min_peaks: int
             return i, [], None
             
         thresholded_hist, bin_edges, peak_indices, peak_densities = result
-        
         # Check if we have enough peaks
         if len(peak_indices) < min_peaks:
             print(f"Insufficient peaks ({len(peak_indices)}) for marker {marker}")

@@ -117,7 +117,6 @@ class MADTimeGate(TimeGateStrategy):
             rejection_count = self._process_positive_geomeans(data, fluoro_channels, breaks['breaks'], 
                                                          marker_names, rejection_count)
             
-        print("rejection count: ", rejection_count)
         # Create final gate vector based on mode
         time_gate_vector = self._create_final_gate(rejection_count)
         filtered_data = data[time_gate_vector]
