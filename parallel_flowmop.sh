@@ -270,7 +270,7 @@ process_file() {
     local file=$1
     local result_file="$TEMP_DIR/$(basename "$file").json"
     
-    # Set variables for environment
+    # Set thread environment variables with actual numeric values
     export OMP_NUM_THREADS=$WORKERS_PER_JOB
     export MKL_NUM_THREADS=$WORKERS_PER_JOB
     export OPENBLAS_NUM_THREADS=$WORKERS_PER_JOB
@@ -288,7 +288,12 @@ process_file() {
         --mad-factor $MAD_FACTOR \
         $CMD_OPTIONS
     
-    echo "Completed: $file"
+    local exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        echo "Completed: $file"
+    else
+        echo "Failed ($exit_code): $file"
+    fi
 }
 
 export -f process_file
@@ -298,8 +303,19 @@ echo "Parallel processing ${#FILES[@]} files with max $MAX_PARALLEL simultaneous
 echo "Each FlowMOP instance will use $WORKERS_PER_JOB worker threads"
 echo "Output will be saved to $OUTPUT_DIR"
 
+# Export thread limit variables for parallel itself
+export PARALLEL_NUMEXPR_NUM_THREADS=$WORKERS_PER_JOB
+export PARALLEL_OMP_NUM_THREADS=$WORKERS_PER_JOB
+export PARALLEL_MKL_NUM_THREADS=$WORKERS_PER_JOB
+export PARALLEL_OPENBLAS_NUM_THREADS=$WORKERS_PER_JOB
+
 # Start parallel processing
-parallel --bar --jobs $MAX_PARALLEL process_file ::: "${FILES[@]}"
+parallel --bar --jobs $MAX_PARALLEL \
+    --env NUMEXPR_NUM_THREADS \
+    --env OMP_NUM_THREADS \
+    --env MKL_NUM_THREADS \
+    --env OPENBLAS_NUM_THREADS \
+    process_file ::: "${FILES[@]}"
 
 echo "Processing complete!"
 echo "Processed ${#FILES[@]} files"
