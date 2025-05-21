@@ -55,7 +55,10 @@ def filter_numerical_columns(data: pd.DataFrame) -> pd.DataFrame:
 
 def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'positives', 
                 mad_smoothing: list = None, enable_plots: bool = False, plots_dir: str = "time_gate_plots",
-                enable_ssc: bool = False, remove_beads: bool = False) -> None:
+                enable_ssc: bool = False, remove_beads: bool = False,
+                skip_debris: bool = False, skip_time: bool = False, skip_doublets: bool = False,
+                remove_zeros: bool = True, min_cells: int = 1000, max_bins: int = 600,
+                step_val: int = 200, mad_factor: int = 3, enable_dask: bool = True) -> None:
     """
     Process a data file through the FlowMOP pipeline.
     
@@ -72,6 +75,15 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
         plots_dir: Directory to save time gate plots
         enable_ssc: Whether to use SSC-A for debris gating in addition to FSC-A
         remove_beads: Whether to detect and remove beads based on SSC/FSC characteristics
+        skip_debris: Whether to skip debris filtering
+        skip_time: Whether to skip time filtering
+        skip_doublets: Whether to skip doublet filtering
+        remove_zeros: Whether to remove zero values before processing
+        min_cells: Minimum number of cells required for processing a bin
+        max_bins: Maximum number of bins to divide data into
+        step_val: Step size for binning
+        mad_factor: Factor for MAD calculation for gating
+        enable_dask: Whether to use Dask for parallel processing
     """
     # Load data file
     meta, data = load_data(file_path)
@@ -98,12 +110,12 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
     # Initialize FlowMOP
     flowmop = flowmop_new.FlowMOP(
         time_channel_index=time_channel_index,
-        remove_zeros=True,
-        min_cells=1000,
-        max_bins=600,
-        step=200,
-        MAD=5,
-        enable_dask=True,
+        remove_zeros=remove_zeros,
+        min_cells=min_cells,
+        max_bins=max_bins,
+        step=step_val,
+        MAD=mad_factor,
+        enable_dask=enable_dask,
         fluor_mode=fluor_mode,
         mad_smoothings=mad_smoothing,
         enable_plots=enable_plots,
@@ -115,6 +127,18 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
     # Process the data
     vectors = flowmop.process_fcs_data(marker_names, fcs_array)
     print("\nProcessing successful!")
+
+    # Apply skipping logic
+    if skip_debris:
+        print("Skipping debris filtering.")
+        vectors['debris'] = np.ones_like(vectors['debris'])
+    if skip_time:
+        print("Skipping time filtering.")
+        vectors['time'] = np.ones_like(vectors['time'])
+    if skip_doublets:
+        print("Skipping doublet filtering.")
+        vectors['doublet'] = np.ones_like(vectors['doublet'])
+
     print("Original events:", len(fcs_array))
     print("processed events lod:", len(fcs_array[vectors['lod'] == 1]))
     print("processed events debris:", len(fcs_array[vectors['debris'] == 1]))
@@ -158,19 +182,36 @@ def main():
     parser.add_argument('files', nargs='+', help='Path(s) to data file(s) to process (FCS or Parquet)')
     parser.add_argument('--output-dir', help='Directory to save output files')
     parser.add_argument('--fluor-mode', choices=['positives', 'geomean', 'positive_geomeans', 'both'], default='positive_geomeans',
-                        help='Mode for fluorescence anomaly detection (default: positives)')
-    parser.add_argument('--mad-smoothing', type=float, nargs='+', default=[0.0, 1.0],
-                        help='Smoothing factors for MAD-based time gating (default: 0.0 1.0)')
+                        help='Mode for fluorescence anomaly detection (default: positive_geomeans)')
+    parser.add_argument('--mad-smoothing', type=float, nargs='+', default=[0.1, 0.9],
+                        help='Smoothing factors for MAD-based time gating (default: 0.1 0.9)')
     parser.add_argument('--enable-plots', action='store_true', default=False, help='Generate time gate plots for each channel')
     parser.add_argument('--plots-dir', type=str, default='time_gate_plots', help='Directory to save time gate plots')
     parser.add_argument('--enable-ssc', action='store_true', default=False, help='Use SSC-A for debris gating in addition to FSC-A')
     parser.add_argument('--remove-beads', action='store_true', default=False, help='Detect and remove beads based on SSC/FSC characteristics')
     
+    # Add new skip arguments
+    parser.add_argument('--skip-debris', action='store_true', default=False, help='Skip debris filtering')
+    parser.add_argument('--skip-time', action='store_true', default=False, help='Skip time filtering')
+    parser.add_argument('--skip-doublets', action='store_true', default=False, help='Skip doublet filtering')
+
+    # Arguments for FlowMOP internal parameters
+    parser.add_argument('--min-cells', type=int, default=1000, help='Minimum number of cells required for processing a bin (default: 1000)')
+    parser.add_argument('--max-bins', type=int, default=600, help='Maximum number of bins to divide data into (default: 600)')
+    parser.add_argument('--step-val', type=int, default=200, help='Step size for binning (default: 200)')
+    parser.add_argument('--mad-factor', type=int, default=3, help='Factor for MAD calculation for gating (default: 3)')
+    parser.add_argument('--disable-remove-zeros', action='store_false', dest='remove_zeros', help='Disable removal of zero values (zeros are removed by default)')
+    parser.add_argument('--disable-dask', action='store_false', dest='enable_dask', help='Disable Dask for parallel processing (Dask is enabled by default)')
+    parser.set_defaults(remove_zeros=True, enable_dask=True)
+
     args = parser.parse_args()
     
     for file_path in args.files:
         process_file(file_path, args.output_dir, args.fluor_mode, args.mad_smoothing, 
-                    args.enable_plots, args.plots_dir, args.enable_ssc, args.remove_beads)
+                    args.enable_plots, args.plots_dir, args.enable_ssc, args.remove_beads,
+                    args.skip_debris, args.skip_time, args.skip_doublets,
+                    args.remove_zeros, args.min_cells, args.max_bins,
+                    args.step_val, args.mad_factor, args.enable_dask)
 
 if __name__ == '__main__':
     main()
