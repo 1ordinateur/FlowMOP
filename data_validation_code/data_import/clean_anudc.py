@@ -138,3 +138,5 @@ if __name__ == "__main__":
         print(f"Process failed: The metadata CSV file is empty. Details: {e}")
     except Exception as e:
         print(f"An unexpected error occurred during the process: {e}")
+
+    print("ATTENTION: Upon completion of this, manually migrate files to one big new directory, and run the next script.")
