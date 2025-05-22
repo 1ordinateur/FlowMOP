@@ -323,7 +323,7 @@ class InflectionDoubletGate(DoubletGateStrategy):
     def gate(self, data: ArrayType, marker_names: List[str]) -> Tuple[ArrayType, ArrayType]:
         """
         Apply inflection point-based doublet gating to the data.
-        Falls back to MAD-based thresholding if inflection method fails.
+        Falls back to MAD-based thresholding for a parameter if its inflection method fails.
         
         Args:
             data: Flow cytometry data array
@@ -332,6 +332,7 @@ class InflectionDoubletGate(DoubletGateStrategy):
         Returns:
             tuple: (filtered_data, doublet_vector)
         """
+        self._debug_info = {}  # Reset debug info for each call
         # Ensure data is in Dask array format if Dask is enabled
         if self.enable_dask and not isinstance(data, da.Array):
             data = da.from_array(data, chunks=(self.chunk_size or 'auto', -1))
@@ -345,44 +346,92 @@ class InflectionDoubletGate(DoubletGateStrategy):
                 
         # Calculate aspect ratios for both FSC and SSC
         fsc_ratio, ssc_ratio = self._calculate_ratios(data, marker_names)
-        self._debug_info['ratios'] = {'fsc': fsc_ratio, 'ssc': ssc_ratio}
+        self._debug_info['ratios_provided'] = {'fsc_type': str(type(fsc_ratio)), 'ssc_type': str(type(ssc_ratio))}
 
-        # Try inflection point method for both parameters
-        inflection_success = False
-        fsc_threshold, ssc_threshold = None, None
+        # Convert ratios to NumPy arrays for histogram generation and MAD calculation
+        fsc_ratio_np: np.ndarray
+        ssc_ratio_np: np.ndarray
 
-        # Generate histograms for both FSC and SSC ratios
-        fsc_hist, fsc_bin_edges, fsc_peaks = self._generate_smooth_histogram(fsc_ratio)
-        ssc_hist, ssc_bin_edges, ssc_peaks = self._generate_smooth_histogram(ssc_ratio)
-        self._debug_info['histograms'] = {'fsc': fsc_hist, 'ssc': ssc_hist}
+        if isinstance(fsc_ratio, da.Array):
+            fsc_ratio_np = fsc_ratio.compute()
+        else: # Already a numpy array or enable_dask is False
+            fsc_ratio_np = fsc_ratio 
+        
+        if isinstance(ssc_ratio, da.Array):
+            ssc_ratio_np = ssc_ratio.compute()
+        else: # Already a numpy array or enable_dask is False
+            ssc_ratio_np = ssc_ratio
+        
+        self._debug_info['ratios_shapes'] = {'fsc_np_shape': fsc_ratio_np.shape, 'ssc_np_shape': ssc_ratio_np.shape}
 
-        # Analyze both histograms for thresholds
-        fsc_threshold, fsc_success = self._analyze_histogram_for_threshold(
-            fsc_hist, fsc_bin_edges, fsc_peaks
-        )
-        ssc_threshold, ssc_success = self._analyze_histogram_for_threshold(
-            ssc_hist, ssc_bin_edges, ssc_peaks
-        )
-        inflection_success = fsc_success and ssc_success
+        # Generate histograms for both FSC and SSC ratios using NumPy arrays
+        # _generate_smooth_histogram returns (smoothed_hist, bin_edges, peak_indices)
+        fsc_hist_output = self._generate_smooth_histogram(fsc_ratio_np)
+        ssc_hist_output = self._generate_smooth_histogram(ssc_ratio_np)
 
-        # Fall back to MAD-based thresholding if either analysis fails
-        if not inflection_success:
-            warnings.warn("Inflection point method failed to find thresholds. Falling back to MAD-based thresholding.")
-            mad_gate = MADDoubletGate(mad_threshold=self.fallback_mad_threshold)
-            filtered_data, doublet_vector = mad_gate.gate(data, marker_names)
-                        
-            return filtered_data, doublet_vector
-        else:
-            # Apply combined inflection-based thresholds
-            filtered_data, doublet_vector = self._apply_inflection_threshold(
-                data, 
-                fsc_ratio, fsc_threshold,
-                ssc_ratio, ssc_threshold
+        fsc_threshold: float
+        ssc_threshold: float
+
+        # Analyze FSC histogram for threshold
+        if fsc_hist_output[0].size > 0 and fsc_hist_output[1].size > 0: # Check if histogram data is valid
+            fsc_threshold_inflection, fsc_success = self._analyze_histogram_for_threshold(
+                fsc_hist_output[0], fsc_hist_output[1], fsc_hist_output[2] # hist, bin_edges, peaks
             )
-            self._debug_info['thresholds'] = {'fsc': fsc_threshold, 'ssc': ssc_threshold}
-            return filtered_data, doublet_vector
+        else:
+            fsc_threshold_inflection, fsc_success = None, False
+            warnings.warn("FSC histogram generation failed or produced empty output. Cannot use inflection method for FSC.")
 
-    def _generate_smooth_histogram(self, data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        # Determine final FSC threshold
+        if fsc_success and fsc_threshold_inflection is not None:
+            fsc_threshold = fsc_threshold_inflection
+            self._debug_info['fsc_method'] = 'inflection'
+        else:
+            fail_reason = "returned None" if fsc_threshold_inflection is None and fsc_success else "method failed or histogram was invalid"
+            warnings.warn(
+                f"FSC inflection point analysis {fail_reason}. "
+                "Falling back to MAD-based thresholding for FSC."
+            )
+            fsc_threshold = self._calculate_mad_threshold(fsc_ratio_np) # Pass NumPy array
+            self._debug_info['fsc_method'] = 'mad'
+            if np.isnan(fsc_threshold):
+                 warnings.warn("FSC MAD threshold calculation resulted in NaN. FSC gating might be ineffective or filter all events.")
+
+        # Analyze SSC histogram for threshold
+        if ssc_hist_output[0].size > 0 and ssc_hist_output[1].size > 0: # Check if histogram data is valid
+            ssc_threshold_inflection, ssc_success = self._analyze_histogram_for_threshold(
+                ssc_hist_output[0], ssc_hist_output[1], ssc_hist_output[2] # hist, bin_edges, peaks
+            )
+        else:
+            ssc_threshold_inflection, ssc_success = None, False
+            warnings.warn("SSC histogram generation failed or produced empty output. Cannot use inflection method for SSC.")
+
+        # Determine final SSC threshold
+        if ssc_success and ssc_threshold_inflection is not None:
+            ssc_threshold = ssc_threshold_inflection
+            self._debug_info['ssc_method'] = 'inflection'
+        else:
+            fail_reason = "returned None" if ssc_threshold_inflection is None and ssc_success else "method failed or histogram was invalid"
+            warnings.warn(
+                f"SSC inflection point analysis {fail_reason}. "
+                "Falling back to MAD-based thresholding for SSC."
+            )
+            ssc_threshold = self._calculate_mad_threshold(ssc_ratio_np) # Pass NumPy array
+            self._debug_info['ssc_method'] = 'mad'
+            if np.isnan(ssc_threshold):
+                warnings.warn("SSC MAD threshold calculation resulted in NaN. SSC gating might be ineffective or filter all events.")
+        
+        # Apply combined thresholds (using original fsc_ratio, ssc_ratio which can be Dask arrays)
+        filtered_data, doublet_vector = self._apply_inflection_threshold(
+            data, 
+            fsc_ratio, 
+            ssc_ratio, 
+            fsc_threshold, 
+            ssc_threshold
+        )
+        self._debug_info['thresholds'] = {'fsc': fsc_threshold, 'ssc': ssc_threshold}
+        return filtered_data, doublet_vector
+
+    def _generate_smooth_histogram(self, data: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Generate smoothed histogram using process_histogram from flowmop_utils.
         Only considers ratios >= 1 since values below 1 are not biologically meaningful
@@ -392,7 +441,7 @@ class InflectionDoubletGate(DoubletGateStrategy):
             data: Input ratio data
             
         Returns:
-            tuple: (smoothed_hist, bin_edges)
+            tuple: (smoothed_hist, bin_edges, peak_indices)
         """
         # Remove NaN values and restrict to biologically meaningful ratios (>= 1)
         data = data[~np.isnan(data)]
@@ -470,25 +519,29 @@ class InflectionDoubletGate(DoubletGateStrategy):
             
         return None, False
 
-    def _apply_inflection_threshold(self, data: ArrayType, fsc_ratio: ArrayType, 
-                                  fsc_threshold: float) -> Tuple[ArrayType, ArrayType]:
+    def _apply_inflection_threshold(self, data: ArrayType, fsc_ratio: ArrayType, ssc_ratio: ArrayType,
+                                  fsc_threshold: float, ssc_threshold: float) -> Tuple[ArrayType, ArrayType]:
         """
-        Apply inflection-based threshold to the data.
+        Apply inflection-based threshold to the data using both FSC and SSC ratios.
         
         Args:
             data: Input data array
             fsc_ratio: FSC ratio array
-            fsc_threshold: Threshold value
+            ssc_ratio: SSC ratio array 
+            fsc_threshold: FSC threshold value
+            ssc_threshold: SSC threshold value
             
         Returns:
             tuple: (filtered_data, doublet_vector)
         """
         # Handle Dask arrays appropriately
-        if self.enable_dask and isinstance(fsc_ratio, da.Array):
-            doublet_vector = (fsc_ratio <= fsc_threshold).astype(np.int32)
+        if self.enable_dask and (isinstance(fsc_ratio, da.Array) or isinstance(ssc_ratio, da.Array)):
+            doublet_vector = ((fsc_ratio <= fsc_threshold) & 
+                            (ssc_ratio <= ssc_threshold)).astype(np.int32)
             filtered_data = data[doublet_vector == 1]
         else:
-            doublet_vector = (fsc_ratio <= fsc_threshold).astype(np.int32)
+            doublet_vector = ((fsc_ratio <= fsc_threshold) & 
+                            (ssc_ratio <= ssc_threshold)).astype(np.int32)
             filtered_data = data[doublet_vector == 1]
             
         return filtered_data, doublet_vector
