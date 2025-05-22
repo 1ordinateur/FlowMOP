@@ -8,6 +8,18 @@
 
 set -e
 
+# Function to remove spaces from filenames
+remove_spaces() {
+    local dir="$1"
+    find "$dir" -type f -name "* *" | while read -r file; do
+        newname=$(echo "$file" | tr ' ' '_')
+        if [ "$file" != "$newname" ]; then
+            echo "Renaming: $file -> $newname"
+            mv "$file" "$newname"
+        fi
+    done
+}
+
 # Default values
 INPUT_DIR=""
 OUTPUT_DIR=""
@@ -163,6 +175,10 @@ fi
 
 # Create output directory if it doesn't exist
 mkdir -p "$OUTPUT_DIR"
+
+# Remove spaces from filenames in input directory
+echo "Checking for and removing spaces from filenames..."
+remove_spaces "$INPUT_DIR"
 
 # Find files to process
 if [[ "$FILE_PATTERN" == "*.fcs" ]]; then

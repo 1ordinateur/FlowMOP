@@ -26,7 +26,7 @@ def load_data(file_path: str) -> tuple:
         # Create empty metadata for parquet files
         meta = {'__file_type__': 'parquet'}
     else:
-        raise ValueError(f"Unsupported file format: {file_path.suffix}. Supported formats are .fcs and .parquet")
+        raise ValueError(f"Unsupported file format: {file_path.suffix} for file {file_path}. Supported formats are .fcs and .parquet")
     
     return meta, data
 
