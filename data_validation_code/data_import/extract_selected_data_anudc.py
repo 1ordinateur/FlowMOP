@@ -19,26 +19,26 @@ FCS_FILES_BASE_DIR: pathlib.Path = pathlib.Path(
 )
 # Output path for the CSV with selected and processed columns
 OUTPUT_SELECTED_COLUMNS_CSV: pathlib.Path = pathlib.Path(
-    "/g/data/eu59/data_flowmop/ANUDC_16/selected_metadata_columns.csv"
+    "/g/data/eu59/data_flowmop/ANUDC_16/selected_metadata_columns_cellspanel.csv"
 )
 # Output path for the CSV with marker names from sampled FCS files
 OUTPUT_MARKER_NAMES_CSV: pathlib.Path = pathlib.Path(
-    "/g/data/eu59/data_flowmop/ANUDC_16/sampled_marker_names.csv"
+    "/g/data/eu59/data_flowmop/ANUDC_16/sampled_marker_names_cellspanel.csv"
 )
 # Output path for the filtered dataset with existing files only
 OUTPUT_FILTERED_LABEL_CSV: pathlib.Path = pathlib.Path(
-    "/g/data/eu59/data_flowmop/ANUDC_16/filtered_label_dataset.csv"
+    "/g/data/eu59/data_flowmop/ANUDC_16/filtered_label_dataset_cellspanel.csv"
 )
 # Output paths for train/test splits
 OUTPUT_TRAIN_CSV: pathlib.Path = pathlib.Path(
-    "/g/data/eu59/data_flowmop/ANUDC_16/train.csv"
+    "/g/data/eu59/data_flowmop/ANUDC_16/train_cellspanel.csv"
 )
 OUTPUT_TEST_CSV: pathlib.Path = pathlib.Path(
-    "/g/data/eu59/data_flowmop/ANUDC_16/test.csv"
+    "/g/data/eu59/data_flowmop/ANUDC_16/test_cellspanel.csv"
 )
 # Base directory for train/test file organization
 TRAIN_TEST_BASE_DIR: pathlib.Path = pathlib.Path(
-    "/g/data/eu59/data_flowmop/ANUDC_16/train_test_split"
+    "/g/data/eu59/data_flowmop/ANUDC_16/train_test_split_cellspanel"
 )
 
 # Column names
@@ -70,30 +70,54 @@ def filter_existing_files(
     print(f"Checking file existence in {fcs_base_dir}")
     
     existing_files = []
-    missing_files = []
+    missing_files_details = [] # Changed to store more details
     
     for idx, filename in enumerate(metadata_df[filename_col]):
+        original_filename_in_metadata = filename # Keep original for logging
         fcs_file_path = fcs_base_dir / filename
         
         # Try different file path variations
         file_exists = False
+        paths_tried = [] # Log paths attempted
+
+        # Attempt 1: Direct path from metadata
+        paths_tried.append(str(fcs_file_path))
         if fcs_file_path.is_file():
             file_exists = True
-        elif fcs_file_path.with_suffix(fcs_file_path.suffix + '.fcs').is_file():
-            file_exists = True
-        elif not fcs_file_path.name.lower().endswith('.fcs'):
-            fcs_file_path_with_suffix = fcs_base_dir / (filename + ".fcs")
-            if fcs_file_path_with_suffix.is_file():
-                file_exists = True
+        else:
+            # Attempt 2: Add .fcs suffix if not already there implicitly or explicitly
+            # (Handles cases where metadata filename might be 'file' and actual is 'file.fcs')
+            # (Also handles if metadata is 'file.FCS' but actual is 'file.FCS.fcs' - less likely but good to check)
+            current_suffix_lower = fcs_file_path.suffix.lower()
+            if current_suffix_lower != '.fcs':
+                fcs_path_with_dot_fcs = fcs_file_path.with_suffix(fcs_file_path.suffix + '.fcs')
+                paths_tried.append(str(fcs_path_with_dot_fcs))
+                if fcs_path_with_dot_fcs.is_file():
+                    file_exists = True
+                    fcs_file_path = fcs_path_with_dot_fcs # Update to the found path
+
+            # Attempt 3: If original filename in metadata doesn't end with .fcs (any case)
+            # and previous attempts failed, try appending .fcs to the original filename string.
+            if not file_exists and not original_filename_in_metadata.lower().endswith('.fcs'):
+                fcs_file_path_with_suffix_added_to_original = fcs_base_dir / (original_filename_in_metadata + ".fcs")
+                paths_tried.append(str(fcs_file_path_with_suffix_added_to_original))
+                if fcs_file_path_with_suffix_added_to_original.is_file():
+                    file_exists = True
+                    fcs_file_path = fcs_file_path_with_suffix_added_to_original # Update
         
         if file_exists:
             existing_files.append(idx)
         else:
-            missing_files.append(filename)
+            missing_files_details.append({
+                "metadata_filename": original_filename_in_metadata,
+                "paths_tried": paths_tried
+            })
     
     print(f"Found {len(existing_files)} existing files out of {len(metadata_df)} total")
-    if missing_files:
-        print(f"Missing {len(missing_files)} files: {missing_files[:10]}...")  # Show first 10
+    if missing_files_details:
+        print(f"Could not find {len(missing_files_details)} files. Details for the first 10 missing files:")
+        for i, detail in enumerate(missing_files_details[:10]):
+            print(f"  {i+1}. Metadata filename: '{detail['metadata_filename']}', Paths tried: {detail['paths_tried']}")
     
     # Filter DataFrame to only include existing files
     filtered_df = metadata_df.iloc[existing_files].copy()
@@ -167,18 +191,17 @@ def create_stratified_split_and_move_files(
     test_dir.mkdir(parents=True, exist_ok=True)
     
     # Move files to train directory
-    move_files_to_directory(train_df[filename_col], fcs_base_dir, train_dir, "train")
+    copy_files_to_directory(train_df[filename_col], fcs_base_dir, train_dir, "train")
     
     # Move files to test directory
-    move_files_to_directory(test_df[filename_col], fcs_base_dir, test_dir, "test")
+    copy_files_to_directory(test_df[filename_col], fcs_base_dir, test_dir, "test")
     
     print(f"Train set: {len(train_df)} files")
     print(f"Test set: {len(test_df)} files")
     print(f"Class distribution in train: {train_df[label_col].value_counts().to_dict()}")
     print(f"Class distribution in test: {test_df[label_col].value_counts().to_dict()}")
 
-
-def move_files_to_directory(
+def copy_files_to_directory(
     filenames: pd.Series,
     source_dir: pathlib.Path,
     dest_dir: pathlib.Path,
@@ -211,7 +234,7 @@ def move_files_to_directory(
         if source_file.is_file():
             dest_file = dest_dir / source_file.name
             try:
-                shutil.move(str(source_file), str(dest_file))
+                shutil.copy2(str(source_file), str(dest_file))
                 moved_count += 1
             except Exception as e:
                 print(f"Error moving {source_file} to {dest_file}: {e}")
@@ -316,145 +339,6 @@ def extract_and_save_selected_columns(
     # Return the full dataframe with the new processed column for sampling
     return metadata_df
 
-
-def sample_fcs_extract_validate_markers(
-    metadata_df: pd.DataFrame,
-    fcs_base_dir: pathlib.Path,
-    filename_col: str,
-    num_samples: int,
-    output_csv_path: pathlib.Path,
-) -> None:
-    """
-    Samples FCS files, extracts marker names, validates their consistency,
-    and saves them to a CSV.
-
-    Args:
-        metadata_df: DataFrame containing filenames (must include 'filename_col').
-        fcs_base_dir: Base directory where FCS files are located.
-        filename_col: Name of the column in metadata_df with FCS filenames.
-        num_samples: Number of FCS files to randomly sample.
-        output_csv_path: Path to save the CSV of marker names.
-
-    Raises:
-        FileNotFoundError: If an FCS file path does not exist.
-        ValueError: If no FCS files are available for sampling, or if
-                    marker names are inconsistent across sampled files.
-        Exception: For other errors during FCS file processing.
-    """
-    if filename_col not in metadata_df.columns:
-        raise KeyError(f"Filename column '{filename_col}' not in DataFrame.")
-
-    all_filenames = metadata_df[filename_col].tolist()
-    if not all_filenames:
-        raise ValueError("No FCS filenames available in the provided metadata to sample from.")
-
-    if len(all_filenames) < num_samples:
-        print(
-            f"Warning: Requested {num_samples} samples, but only "
-            f"{len(all_filenames)} files are available. Using all available files."
-        )
-        sampled_filenames = all_filenames
-    else:
-        sampled_filenames = random.sample(all_filenames, num_samples)
-    
-    if not sampled_filenames:
-        print("No files were sampled. Marker CSV will not be generated.")
-        return
-
-    print(f"Selected {len(sampled_filenames)} files for marker extraction: {sampled_filenames}")
-
-    marker_data: List[Dict[str, Any]] = []
-    all_marker_sets: List[Tuple[str, ...]] = []
-    first_marker_set: Optional[Tuple[str, ...]] = None
-
-    for i, fname in enumerate(sampled_filenames):
-        fcs_file_path = fcs_base_dir / fname
-        if not fcs_file_path.is_file():
-            # Try with .fcs if not found directly (clean_anudc removes spaces but keeps suffix)
-            if not fcs_file_path.with_suffix(fcs_file_path.suffix + '.fcs').is_file() and not fcs_file_path.name.lower().endswith('.fcs'):
-                 fcs_file_path_attempt = fcs_base_dir / (fname + ".fcs") # common if original filename had no suffix in CSV
-                 if not fcs_file_path_attempt.is_file():
-                    raise FileNotFoundError(
-                        f"FCS file not found: {fcs_file_path} or {fcs_file_path_attempt}"
-                    )
-                 fcs_file_path = fcs_file_path_attempt
-            elif not fcs_file_path.is_file() and fcs_file_path.with_suffix(fcs_file_path.suffix + '.fcs').is_file():
-                 fcs_file_path = fcs_file_path.with_suffix(fcs_file_path.suffix + '.fcs')
-
-
-        print(f"Processing file ({i+1}/{len(sampled_filenames)}): {fcs_file_path}")
-        try:
-            fd = flowio.FlowData(str(fcs_file_path))
-            
-            # Extract PnN labels by iterating through $P<n>N keywords in fd.text
-            num_channels = fd.channel_count
-            pnn_labels_list: List[str] = []
-            for channel_idx in range(1, num_channels + 1):
-                marker_key = f'$P{channel_idx}N'
-                if marker_key in fd.text:
-                    pnn_labels_list.append(fd.text[marker_key])
-                else:
-                    # Fallback if a PnN keyword is missing for a channel
-                    pnn_labels_list.append(f"MISSING_P{channel_idx}N_LABEL")
-                    print(
-                        f"Warning: Marker key {marker_key} not found in FCS file "
-                        f"{fname} (path: {fcs_file_path}). Using placeholder."
-                    )
-
-            current_markers: Tuple[str, ...] = tuple(pnn_labels_list)
-            all_marker_sets.append(current_markers)
-
-            if first_marker_set is None:
-                first_marker_set = current_markers
-            elif current_markers != first_marker_set:
-                # For a more detailed error, could collect all differing ones
-                error_msg = (
-                    f"Marker inconsistency found! File '{fname}' markers "
-                    f"{current_markers} do not match first sampled file's markers "
-                    f"{first_marker_set}."
-                )
-                # Find all distinct marker sets for better error reporting
-                distinct_marker_sets: Dict[Tuple[str, ...], List[str]] = {}
-                for f, m_set in zip(sampled_filenames[:i+1], all_marker_sets):
-                    if m_set not in distinct_marker_sets:
-                        distinct_marker_sets[m_set] = []
-                    distinct_marker_sets[m_set].append(f)
-                
-                if len(distinct_marker_sets) > 1:
-                    error_details = "\\n".join(
-                        [f"  Markers: {m_set} found in files: {files}" for m_set, files in distinct_marker_sets.items()]
-                    )
-                    error_msg = (
-                        "Marker sets are not consistent across all sampled FCS files.\\n"
-                        f"Details of differing sets:\\n{error_details}"
-                    )
-                raise ValueError(error_msg)
-
-            # Store for CSV: filename and individual markers
-            row_data: Dict[str, Any] = {filename_col: fname}
-            for idx, marker_name in enumerate(current_markers):
-                row_data[f"marker_{idx+1}"] = marker_name
-            marker_data.append(row_data)
-
-        except Exception as e:
-            print(f"Error processing FCS file {fcs_file_path}: {e}")
-            raise
-
-    if not marker_data:
-        print("No marker data extracted. CSV will not be generated.")
-        return
-
-    # If validation passed (or only one file sampled), save to CSV
-    marker_df = pd.DataFrame(marker_data)
-    try:
-        output_csv_path.parent.mkdir(parents=True, exist_ok=True)
-        marker_df.to_csv(output_csv_path, index=False)
-        print(f"Marker names saved to: {output_csv_path}")
-    except Exception as e:
-        print(f"Error saving marker names CSV to {output_csv_path}: {e}")
-        raise
-
-
 def main() -> None:
     """
     Main function to orchestrate the data extraction and processing.
@@ -499,14 +383,6 @@ def main() -> None:
             train_test_base_dir=TRAIN_TEST_BASE_DIR,
         )
         
-        print("\\nStep 4: Sampling FCS files and extracting/validating marker names.")
-        sample_fcs_extract_validate_markers(
-            metadata_df=filtered_df, # Use the filtered df
-            fcs_base_dir=TRAIN_TEST_BASE_DIR / "train",  # Use train directory since files were moved
-            filename_col=FILENAME_COLUMN_IN_METADATA,
-            num_samples=min(NUMBER_OF_FCS_FILES_TO_SAMPLE, len(filtered_df)),
-            output_csv_path=OUTPUT_MARKER_NAMES_CSV,
-        )
         print("\\nProcess completed successfully.")
 
     except FileNotFoundError as e:

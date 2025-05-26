@@ -14,21 +14,25 @@
 ###load module set
 module use /g/data/dk92/apps/Modules/modulefiles/; module load NCI-data-analysis; module load parallel; cd /g/data/eu59/
 
-FlowMOP/src/parallel_flowmop.sh \
-    --input-dir /g/data/eu59/data_flowmop/fig_4_data/heuvue/train/ \
-    --output-dir /g/data/eu59/data_flowmop/fig_4_data/heuvue/train_cleaned/ 
+# FlowMOP/src/parallel_flowmop.sh \
+#     --input-dir /g/data/eu59/data_flowmop/fig_4_data/heuvue/train/ \
+#     --output-dir /g/data/eu59/data_flowmop/fig_4_data/heuvue/train_cleaned/ 
 
-FlowMOP/src/parallel_flowmop.sh \
-    --input-dir /g/data/eu59/data_flowmop/fig_4_data/heuvue/test/ \
-    --output-dir /g/data/eu59/data_flowmop/fig_4_data/heuvue/test_cleaned/ 
+# FlowMOP/src/parallel_flowmop.sh \
+#     --input-dir /g/data/eu59/data_flowmop/fig_4_data/heuvue/test/ \
+#     --output-dir /g/data/eu59/data_flowmop/fig_4_data/heuvue/test_cleaned/ 
 
-FlowMOP/src/parallel_flowmop.sh \
-    --input-dir /g/data/eu59/data_flowmop/ANUDC_16/FCS_files/cells_panel/ \
-    --output-dir /g/data/eu59/data_flowmop/ANUDC_16/FCS_files/cells_panel_cleaned/ 
+# FlowMOP/src/parallel_flowmop.sh \
+#     --input-dir /g/data/eu59/data_flowmop/ANUDC_16/train_test_split_cellspanel/train/ \
+#     --output-dir /g/data/eu59/data_flowmop/ANUDC_16/train_test_split_cellspanel/train_flowmopped/ 
 
-FlowMOP/src/parallel_flowmop.sh \
-    --input-dir /g/data/eu59/data_flowmop/cleaned_compiled_fig_2_dataset/ \
-    --output-dir /g/data/eu59/data_flowmop/cleaned_compiled_fig_2_dataset_flowmopped/ 
+# FlowMOP/src/parallel_flowmop.sh \
+#     --input-dir /g/data/eu59/data_flowmop/ANUDC_16/train_test_split_cellspanel/test/ \
+#     --output-dir /g/data/eu59/data_flowmop/ANUDC_16/train_test_split_cellspanel/test_flowmopped/ 
+
+# FlowMOP/src/parallel_flowmop.sh \
+#     --input-dir /g/data/eu59/data_flowmop/cleaned_compiled_fig_2_dataset/ \
+#     --output-dir /g/data/eu59/data_flowmop/cleaned_compiled_fig_2_dataset_flowmopped/ 
 
 FlowMOP/src/parallel_flowmop.sh \
     --input-dir /g/data/eu59/data_flowmop/cleaned_compiled_fig_3_dataset/ \
