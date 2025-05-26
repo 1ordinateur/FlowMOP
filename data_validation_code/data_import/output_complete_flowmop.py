@@ -68,21 +68,21 @@ def output_complete_flowmop(input_directory: str, output_directory: str = None):
             output_filename = fcs_file.stem + "_passfiltered" + fcs_file.suffix
             output_file_path = output_path / output_filename
             
-            modified_meta = meta.copy()
-            for key in modified_meta:
-                if key.startswith('$P') and key.endswith('S'):
-                    n_key = key.replace('S', 'N')
-                    if n_key in modified_meta:
-                        modified_meta[key] = modified_meta[n_key]
-                        logger.debug(f"Set {key} = {modified_meta[n_key]}")
-            
             channel_names = filtered_data.columns.tolist()
             values = filtered_data.values
+            
+            # Create text keywords to set P$S values equal to P$N values
+            text_kw_pr = {}
+            for i, channel_name in enumerate(channel_names):
+                # Set P$S equal to P$N (channel name)
+                text_kw_pr[f'$P{i+1}S'] = channel_name
+                logger.debug(f"Set $P{i+1}S = {channel_name}")
             
             fcswrite.write_fcs(
                 filename=str(output_file_path),
                 chn_names=channel_names,
-                data=values
+                data=values,
+                text_kw_pr=text_kw_pr
             )
             
             logger.info(f"Successfully created: {output_file_path}")
