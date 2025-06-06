@@ -183,14 +183,20 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
         # Prepare complete metadata for preservation
         complete_metadata = {}
         
-        # Preserve ALL original metadata
+        # Preserve original metadata with key sanitization
         if meta:
             for key, value in meta.items():
+                # Sanitize key to prevent format string conflicts
+                key_str = str(key)
+                # Skip keys that could interfere with fcswrite's string formatting
+                if any(char in key_str for char in ['{', '}', "'", '"', ' ', '(', ')']):
+                    continue
+                    
                 # Convert all values to strings for FCS compatibility
                 if isinstance(value, (list, tuple)):
-                    complete_metadata[str(key)] = str(value)
+                    complete_metadata[key_str] = str(value)
                 elif value is not None:
-                    complete_metadata[str(key)] = str(value)
+                    complete_metadata[key_str] = str(value)
         
         # Add FlowMOP processing metadata
         complete_metadata['flowmop_processed'] = 'true'
