@@ -5,30 +5,45 @@ from pathlib import Path
 import fcsparser
 import flowmop_new
 import dask.array as da
+from datetime import datetime
+import os
 
 def load_data(file_path: str) -> tuple:
     """
-    Load data from either FCS or Parquet file.
+    Load data from either FCS or Parquet file with complete metadata extraction.
     
     Args:
         file_path: Path to the data file
         
     Returns:
-        tuple: (meta, data_frame)
+        tuple: (meta, data_frame, original_channel_info)
     """
     file_path = Path(file_path)
+    original_channel_info = {}
+    
     if file_path.suffix.lower() == '.fcs':
         print(f"Loading FCS file: {file_path}")
+        # Extract ALL metadata including channel information
         meta, data = fcsparser.parse(file_path, reformat_meta=True)
+        
+        # Extract comprehensive channel information for preservation
+        original_channel_info = {}
+        for key, value in meta.items():
+            if key.startswith('$P') or key.startswith('_channel_names_') or 'channel' in key.lower():
+                original_channel_info[key] = value
+                
+        print(f"Extracted {len(meta)} metadata fields and {len(original_channel_info)} channel-related fields")
+        
     elif file_path.suffix.lower() == '.parquet':
         print(f"Loading Parquet file: {file_path}")
         data = pd.read_parquet(file_path)
-        # Create empty metadata for parquet files
-        meta = {'__file_type__': 'parquet'}
+        # Create minimal metadata for parquet files
+        meta = {'__file_type__': 'parquet', '__original_file__': str(file_path)}
+        
     else:
         raise ValueError(f"Unsupported file format: {file_path.suffix} for file {file_path}. Supported formats are .fcs and .parquet")
     
-    return meta, data
+    return meta, data, original_channel_info
 
 def filter_numerical_columns(data: pd.DataFrame) -> pd.DataFrame:
     """
@@ -85,8 +100,8 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
         mad_factor: Factor for MAD calculation for gating
         enable_dask: Whether to use Dask for parallel processing
     """
-    # Load data file
-    meta, data = load_data(file_path)
+    # Load data file with complete metadata extraction
+    meta, data, original_channel_info = load_data(file_path)
     
     # Filter to keep only numerical columns
     data = filter_numerical_columns(data)
@@ -154,9 +169,9 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         base_name = Path(file_path).stem
-        output_file = output_path / f"{base_name}_processed.csv"
-        # Also export to FCS file
-        fcs_output_file = output_path / f"{base_name}_processed.fcs"
+        
+        # Use flowmop_ prefix as specified
+        fcs_output_file = output_path / f"flowmop_{base_name}.fcs"
         
         # Create a pandas DataFrame with the original data
         output_df = pd.DataFrame(fcs_array, columns=marker_names)
@@ -165,17 +180,79 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
         for name, vector in vectors.items():
             output_df[f'passed_{name}'] = vector.astype(int)
         
-        # Write to FCS file with original data plus filter results
+        # Prepare complete metadata for preservation
+        complete_metadata = {}
+        
+        # Preserve ALL original metadata
+        if meta:
+            for key, value in meta.items():
+                # Convert all values to strings for FCS compatibility
+                if isinstance(value, (list, tuple)):
+                    complete_metadata[str(key)] = str(value)
+                elif value is not None:
+                    complete_metadata[str(key)] = str(value)
+        
+        # Add FlowMOP processing metadata
+        complete_metadata['flowmop_processed'] = 'true'
+        complete_metadata['flowmop_processing_date'] = datetime.now().isoformat()
+        complete_metadata['flowmop_original_file'] = str(file_path)
+        complete_metadata['flowmop_fluor_mode'] = fluor_mode
+        complete_metadata['flowmop_mad_smoothing'] = str(mad_smoothing)
+        complete_metadata['flowmop_min_cells'] = str(min_cells)
+        complete_metadata['flowmop_max_bins'] = str(max_bins)
+        complete_metadata['flowmop_step_val'] = str(step_val)
+        complete_metadata['flowmop_mad_factor'] = str(mad_factor)
+        complete_metadata['flowmop_events_original'] = str(len(fcs_array))
+        complete_metadata['flowmop_events_final'] = str(len(fcs_array[all_passed]))
+        complete_metadata['flowmop_retention_percent'] = f"{(len(fcs_array[all_passed])/len(fcs_array)*100):.2f}"
+        
+        # Add filter statistics
+        for name, vector in vectors.items():
+            complete_metadata[f'flowmop_{name}_passed'] = str(len(fcs_array[vector == 1]))
+            complete_metadata[f'flowmop_{name}_percent'] = f"{(len(fcs_array[vector == 1])/len(fcs_array)*100):.2f}"
+        
+        # Write to FCS file with complete metadata preservation
         print(f"Exporting to FCS file: {fcs_output_file}")
+        print(f"Preserving {len(complete_metadata)} metadata fields")
+        
         import fcswrite
         # Extract data and channel names from the DataFrame
-        data = output_df.values
-        channel_names = output_df.columns.tolist()
-        # Write to FCS file
-        fcswrite.write_fcs(filename=str(fcs_output_file), 
-                          chn_names=channel_names,
-                          data=data)
-        print(f"Data exported to FCS file: {fcs_output_file}")
+        output_data = output_df.values
+        output_channel_names = output_df.columns.tolist()
+        
+        # Write to FCS file with ALL metadata preserved
+        try:
+            fcswrite.write_fcs(
+                filename=str(fcs_output_file), 
+                chn_names=output_channel_names,
+                data=output_data,
+                text_kw_pr=complete_metadata,  # ALL metadata preserved here
+                compat_chn_names=True,
+                compat_copy=True,
+                compat_negative=True,
+                compat_percent=True
+            )
+            print(f"Successfully exported data with complete metadata to: {fcs_output_file}")
+            print(f"Metadata fields preserved: {len(complete_metadata)}")
+            
+        except Exception as e:
+            print(f"Error writing FCS file: {e}")
+            print("Attempting to write with reduced metadata...")
+            
+            # Fallback: write with minimal metadata if full metadata fails
+            minimal_metadata = {
+                'flowmop_processed': 'true',
+                'flowmop_processing_date': datetime.now().isoformat(),
+                'flowmop_original_file': str(file_path)
+            }
+            
+            fcswrite.write_fcs(
+                filename=str(fcs_output_file), 
+                chn_names=output_channel_names,
+                data=output_data,
+                text_kw_pr=minimal_metadata
+            )
+            print(f"Exported with minimal metadata to: {fcs_output_file}")
 
 def main():
     parser = argparse.ArgumentParser(description='Process data files through FlowMOP pipeline')
