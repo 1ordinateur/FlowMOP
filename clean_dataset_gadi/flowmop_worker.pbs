@@ -1,0 +1,282 @@
+#!/bin/bash
+#PBS -N flowmop_worker
+#PBS -q normal
+#PBS -l ncpus=4
+#PBS -l mem=16GB
+#PBS -l walltime=02:00:00
+#PBS -l wd
+#PBS -j oe
+#PBS -m abe
+
+# PBS directives will be updated by master script with actual project/storage values
+# This is a template that gets customized per submission
+
+set -e
+
+echo "=================================================="
+echo "FlowMOP PBS Worker Job Started"
+echo "Job ID: $PBS_JOBID"
+echo "Started at: $(date)"
+echo "Working directory: $PWD"
+echo "=================================================="
+
+# Load job parameters
+if [[ -z "$WORK_DIR" ]]; then
+    echo "Error: WORK_DIR not set. This script should be called from autosubmit master."
+    exit 1
+fi
+
+# Change to work directory
+cd "$WORK_DIR"
+
+# Load job parameters
+if [[ -f "job_control/job_params.env" ]]; then
+    source job_control/job_params.env
+    echo "Loaded job parameters from job_control/job_params.env"
+else
+    echo "Error: Job parameters file not found"
+    exit 1
+fi
+
+# Load required modules
+module load python3/3.11.0
+echo "Loaded Python module"
+
+# Verify FlowMOP script exists
+if [[ ! -f "$FLOWMOP_SCRIPT" ]]; then
+    echo "Error: FlowMOP script not found at $FLOWMOP_SCRIPT"
+    exit 1
+fi
+
+# Get job iteration counter
+if [[ -f "job_control/job_counter.txt" ]]; then
+    JOB_COUNT=$(cat job_control/job_counter.txt)
+else
+    JOB_COUNT=1
+fi
+
+echo "Job iteration: $JOB_COUNT of max $MAX_JOB_ITERATIONS"
+
+# Check if we've exceeded maximum iterations
+if [[ $JOB_COUNT -gt $MAX_JOB_ITERATIONS ]]; then
+    echo "Maximum job iterations ($MAX_JOB_ITERATIONS) exceeded. Stopping job chain."
+    echo "$(date): Job chain stopped - maximum iterations reached" >> job_control/walltime_log.txt
+    exit 0
+fi
+
+# Calculate walltime thresholds
+START_TIME=$(date +%s)
+# Convert PBS_WALLTIME (HH:MM:SS) to seconds
+IFS=':' read -r hours minutes seconds <<< "$PBS_WALLTIME"
+WALLTIME_SECONDS=$((hours * 3600 + minutes * 60 + seconds))
+RESUBMIT_THRESHOLD=$((WALLTIME_SECONDS - 1800))  # 30 minutes before expiry
+EMERGENCY_THRESHOLD=$((WALLTIME_SECONDS - 300))   # 5 minutes before expiry
+
+echo "Walltime monitoring:"
+echo "  Total walltime: $WALLTIME_SECONDS seconds ($PBS_WALLTIME)"
+echo "  Resubmit threshold: $RESUBMIT_THRESHOLD seconds"
+echo "  Emergency threshold: $EMERGENCY_THRESHOLD seconds"
+
+# Function to check walltime and handle resubmission
+check_walltime() {
+    CURRENT_TIME=$(date +%s)
+    ELAPSED=$((CURRENT_TIME - START_TIME))
+    REMAINING=$((WALLTIME_SECONDS - ELAPSED))
+    
+    if [[ $ELAPSED -gt $EMERGENCY_THRESHOLD ]]; then
+        echo "EMERGENCY: Less than 5 minutes remaining! Exiting immediately."
+        echo "$(date): Job $PBS_JOBID emergency exit at $ELAPSED seconds" >> job_control/walltime_log.txt
+        exit 0
+    elif [[ $ELAPSED -gt $RESUBMIT_THRESHOLD ]]; then
+        echo "Walltime threshold reached. Submitting continuation job..."
+        submit_continuation_job
+        echo "$(date): Job $PBS_JOBID reached walltime threshold, exiting gracefully" >> job_control/walltime_log.txt
+        exit 0
+    fi
+    
+    # Print progress every 10 minutes
+    if [[ $((ELAPSED % 600)) -eq 0 ]] && [[ $ELAPSED -gt 0 ]]; then
+        echo "Progress: ${ELAPSED}s elapsed, ${REMAINING}s remaining"
+    fi
+}
+
+# Function to submit continuation job
+submit_continuation_job() {
+    echo "Preparing continuation job submission..."
+    
+    # Check if there are still files to process
+    REMAINING_FILES=$(find unprocessed/ -name "*.fcs" -o -name "*.parquet" | wc -l)
+    
+    if [[ $REMAINING_FILES -eq 0 ]]; then
+        echo "No more files to process. Job chain completed successfully!"
+        echo "$(date): Job chain completed - no more files to process" >> job_control/walltime_log.txt
+        return 0
+    fi
+    
+    echo "$REMAINING_FILES files remaining to process"
+    
+    # Increment job counter
+    NEW_COUNT=$((JOB_COUNT + 1))
+    echo $NEW_COUNT > job_control/job_counter.txt
+    
+    # Get the directory where the PBS script is located
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PBS_SCRIPT="$SCRIPT_DIR/flowmop_worker.pbs"
+    
+    # Submit continuation job with dependency on current job
+    echo "Submitting continuation job (iteration $NEW_COUNT)..."
+    
+    # Build PBS submission command with proper parameters
+    PBS_SUBMIT_CMD="qsub"
+    PBS_SUBMIT_CMD="$PBS_SUBMIT_CMD -P $PBS_PROJECT"
+    PBS_SUBMIT_CMD="$PBS_SUBMIT_CMD -q $PBS_QUEUE"
+    PBS_SUBMIT_CMD="$PBS_SUBMIT_CMD -l ncpus=$PBS_NCPUS"
+    PBS_SUBMIT_CMD="$PBS_SUBMIT_CMD -l mem=$PBS_MEM"
+    PBS_SUBMIT_CMD="$PBS_SUBMIT_CMD -l walltime=$PBS_WALLTIME"
+    PBS_SUBMIT_CMD="$PBS_SUBMIT_CMD -l wd"
+    if [[ -n "$PBS_STORAGE" ]]; then
+        PBS_SUBMIT_CMD="$PBS_SUBMIT_CMD -l storage=$PBS_STORAGE"
+    fi
+    PBS_SUBMIT_CMD="$PBS_SUBMIT_CMD -W depend=beforeok:$PBS_JOBID"
+    PBS_SUBMIT_CMD="$PBS_SUBMIT_CMD -v WORK_DIR=$WORK_DIR"
+    PBS_SUBMIT_CMD="$PBS_SUBMIT_CMD $PBS_SCRIPT"
+    
+    echo "Executing: $PBS_SUBMIT_CMD"
+    NEXT_JOB_ID=$($PBS_SUBMIT_CMD)
+    
+    if [[ $? -eq 0 ]]; then
+        echo "Successfully submitted continuation job: $NEXT_JOB_ID"
+        echo "$(date): Job $PBS_JOBID -> $NEXT_JOB_ID (iteration $NEW_COUNT, $REMAINING_FILES files remaining)" >> job_control/walltime_log.txt
+    else
+        echo "Error: Failed to submit continuation job"
+        echo "$(date): ERROR - Job $PBS_JOBID failed to submit continuation" >> job_control/walltime_log.txt
+    fi
+}
+
+# Function to process a single file with atomic operations
+process_next_file() {
+    # Find next file to process (prefer .fcs files)
+    NEXT_FILE=$(find unprocessed/ -name "*.fcs" -type f | head -n 1)
+    if [[ -z "$NEXT_FILE" ]]; then
+        # Try parquet files if no FCS files
+        NEXT_FILE=$(find unprocessed/ -name "*.parquet" -type f | head -n 1)
+    fi
+    
+    if [[ -z "$NEXT_FILE" ]]; then
+        echo "No more files to process"
+        return 1
+    fi
+    
+    # Atomic move to processing directory (prevents double-processing)
+    BASENAME=$(basename "$NEXT_FILE")
+    if mv "$NEXT_FILE" "processing/$BASENAME" 2>/dev/null; then
+        echo "Processing: $BASENAME"
+        
+        # Build FlowMOP command options
+        CMD_OPTIONS="--output-dir flowmop_output"
+        CMD_OPTIONS="$CMD_OPTIONS --fluor-mode $FLUOR_MODE"
+        CMD_OPTIONS="$CMD_OPTIONS --mad-smoothing $MAD_SMOOTHING"
+        CMD_OPTIONS="$CMD_OPTIONS --plots-dir $PLOTS_DIR"
+        CMD_OPTIONS="$CMD_OPTIONS --min-cells $MIN_CELLS"
+        CMD_OPTIONS="$CMD_OPTIONS --max-bins $MAX_BINS"
+        CMD_OPTIONS="$CMD_OPTIONS --step-val $STEP_VAL"
+        CMD_OPTIONS="$CMD_OPTIONS --mad-factor $MAD_FACTOR"
+        
+        if [[ $ENABLE_PLOTS -eq 1 ]]; then
+            CMD_OPTIONS="$CMD_OPTIONS --enable-plots"
+        fi
+        if [[ $ENABLE_SSC -eq 1 ]]; then
+            CMD_OPTIONS="$CMD_OPTIONS --enable-ssc"
+        fi
+        if [[ $REMOVE_BEADS -eq 1 ]]; then
+            CMD_OPTIONS="$CMD_OPTIONS --remove-beads"
+        fi
+        if [[ $SKIP_DEBRIS -eq 1 ]]; then
+            CMD_OPTIONS="$CMD_OPTIONS --skip-debris"
+        fi
+        if [[ $SKIP_TIME -eq 1 ]]; then
+            CMD_OPTIONS="$CMD_OPTIONS --skip-time"
+        fi
+        if [[ $SKIP_DOUBLETS -eq 1 ]]; then
+            CMD_OPTIONS="$CMD_OPTIONS --skip-doublets"
+        fi
+        if [[ $REMOVE_ZEROS -eq 0 ]]; then
+            CMD_OPTIONS="$CMD_OPTIONS --disable-remove-zeros"
+        fi
+        
+        # Run FlowMOP processing
+        echo "Executing: python3 $FLOWMOP_SCRIPT processing/$BASENAME $CMD_OPTIONS"
+        
+        if python3 "$FLOWMOP_SCRIPT" "processing/$BASENAME" $CMD_OPTIONS; then
+            # Success: move original file to finished
+            mv "processing/$BASENAME" "finished/$BASENAME"
+            echo "Successfully completed: $BASENAME"
+            
+            # Log success
+            echo "$(date): Completed $BASENAME" >> job_control/walltime_log.txt
+            return 0
+        else
+            # Failure: move to failed directory
+            mv "processing/$BASENAME" "failed/$BASENAME"
+            echo "Failed to process: $BASENAME"
+            
+            # Log failure
+            echo "$(date): FAILED $BASENAME" >> job_control/walltime_log.txt
+            return 0  # Continue processing other files
+        fi
+    else
+        echo "File $BASENAME locked by another process, skipping"
+        return 0
+    fi
+}
+
+# Main processing loop
+echo "Starting main processing loop..."
+FILES_PROCESSED=0
+FILES_FAILED=0
+
+while true; do
+    # Check walltime before each file
+    check_walltime
+    
+    # Try to process next file
+    if process_next_file; then
+        FILES_PROCESSED=$((FILES_PROCESSED + 1))
+        echo "Progress: $FILES_PROCESSED files processed in this job"
+    else
+        # No more files to process
+        break
+    fi
+    
+    # Brief pause between files
+    sleep 1
+done
+
+# Final status report
+TOTAL_UNPROCESSED=$(find unprocessed/ -name "*.fcs" -o -name "*.parquet" | wc -l)
+TOTAL_FINISHED=$(find finished/ -name "*.fcs" -o -name "*.parquet" 2>/dev/null | wc -l)
+TOTAL_FAILED=$(find failed/ -name "*.fcs" -o -name "*.parquet" 2>/dev/null | wc -l)
+TOTAL_OUTPUT=$(find flowmop_output/ -name "flowmop_*.fcs" 2>/dev/null | wc -l)
+
+echo ""
+echo "=================================================="
+echo "Job Status Summary:"
+echo "  Files processed in this job: $FILES_PROCESSED"
+echo "  Total files remaining: $TOTAL_UNPROCESSED"
+echo "  Total files finished: $TOTAL_FINISHED"
+echo "  Total files failed: $TOTAL_FAILED"
+echo "  Total output files: $TOTAL_OUTPUT"
+echo "=================================================="
+
+# Log final status
+echo "$(date): Job $PBS_JOBID completed - processed $FILES_PROCESSED files, $TOTAL_UNPROCESSED remaining" >> job_control/walltime_log.txt
+
+if [[ $TOTAL_UNPROCESSED -eq 0 ]]; then
+    echo "All files processed successfully! Job chain complete."
+    echo "$(date): Job chain completed successfully - all files processed" >> job_control/walltime_log.txt
+else
+    echo "Files remaining for next job in chain."
+fi
+
+echo "Job finished at: $(date)"
+exit 0
