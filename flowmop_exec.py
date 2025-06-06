@@ -236,40 +236,19 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
         # Extract data and channel names from the DataFrame
         output_data = output_df.values
         output_channel_names = output_df.columns.tolist()
-        
-        # Write to FCS file with ALL metadata preserved
-        try:
-            fcswrite.write_fcs(
-                filename=str(fcs_output_file), 
-                chn_names=output_channel_names,
-                data=output_data,
-                text_kw_pr=complete_metadata,  # ALL metadata preserved here
-                compat_chn_names=True,
-                compat_copy=True,
-                compat_negative=True,
-                compat_percent=True
-            )
-            print(f"Successfully exported data with complete metadata to: {fcs_output_file}")
-            print(f"Metadata fields preserved: {len(complete_metadata)}")
-            
-        except Exception as e:
-            print(f"Error writing FCS file: {e}")
-            print("Attempting to write with reduced metadata...")
-            
-            # Fallback: write with minimal metadata if full metadata fails
-            minimal_metadata = {
-                'flowmop_processed': 'true',
-                'flowmop_processing_date': datetime.now().isoformat(),
-                'flowmop_original_file': str(file_path)
-            }
-            
-            fcswrite.write_fcs(
-                filename=str(fcs_output_file), 
-                chn_names=output_channel_names,
-                data=output_data,
-                text_kw_pr=minimal_metadata
-            )
-            print(f"Exported with minimal metadata to: {fcs_output_file}")
+    
+        fcswrite.write_fcs(
+            filename=str(fcs_output_file), 
+            chn_names=output_channel_names,
+            data=output_data,
+            text_kw_pr=complete_metadata,  # ALL metadata preserved here
+            compat_chn_names=True,
+            compat_copy=True,
+            compat_negative=True,
+            compat_percent=True
+        )
+        print(f"Successfully exported data with complete metadata to: {fcs_output_file}")
+        print(f"Metadata fields preserved: {len(complete_metadata)}")
 
 def main():
     parser = argparse.ArgumentParser(description='Process data files through FlowMOP pipeline')
