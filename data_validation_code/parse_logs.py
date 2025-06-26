@@ -119,7 +119,7 @@ def main(root_dir: str, output_file: str):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Parse training logs and aggregate results into a CSV file.")
-    parser.add_argument('root_dir', type=str, help="The root directory to search for training.log files (e.g., 'exp').")
+    parser.add_argument('--root_dir', type=str, help="The root directory to search for training.log files (e.g., 'exp').")
     parser.add_argument('--output', type=str, default='training_results.csv', help="The path to the output CSV file.")
     args = parser.parse_args()
 
