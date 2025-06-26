@@ -11,6 +11,7 @@ def parse_log_file(log_file_path: Path):
     """
     last_epoch_stats = {}
     testing_stats = {}
+    epochs_trained = None
 
     try:
         content = log_file_path.read_text()
@@ -23,9 +24,15 @@ def parse_log_file(log_file_path: Path):
         # Process the first training run
         first_run_content = training_runs[0]
 
-        # Find the last epoch stats before 'Training Finished'
-        # To handle cases where 'Training Finished' might be missing, we find all epoch stats
-        # and take the last one.
+        # Check for early stopping first
+        early_stop_match = re.search(r'Training early stops at epoch: (\d+)', first_run_content)
+        if early_stop_match:
+            try:
+                epochs_trained = int(early_stop_match.group(1))
+            except (ValueError, IndexError):
+                pass  # Should not happen with the regex but good to be safe
+
+        # Find the last epoch stats
         epoch_stats_matches = re.findall(r"Epoch stats: (\{.*\})", first_run_content)
         if epoch_stats_matches:
             try:
@@ -35,6 +42,11 @@ def parse_log_file(log_file_path: Path):
                 last_epoch_stats['val_loss'] = stats_dict.get('val_loss')
                 last_epoch_stats['val_acc'] = stats_dict.get('val_acc')
                 last_epoch_stats['val_auc'] = stats_dict.get('val_auc')
+                
+                # If early stopping wasn't found, get epoch from here
+                if epochs_trained is None:
+                    epochs_trained = stats_dict.get('epoch')
+
             except (SyntaxError, ValueError):
                 pass  # Ignore malformed dictionaries
 
@@ -46,6 +58,9 @@ def parse_log_file(log_file_path: Path):
                 testing_stats['testing_auc'] = float(testing_stats_match.group(2))
             except ValueError:
                 pass # Ignore conversion errors
+
+        if epochs_trained is not None:
+            last_epoch_stats['epochs_trained'] = epochs_trained
 
         if not last_epoch_stats and not testing_stats:
             return None
@@ -86,7 +101,7 @@ def main(root_dir: str, output_file: str):
         all_keys.update(r.keys())
 
     # Define the desired order of columns
-    fieldnames_order = ['experiment', 'testing_auc', 'testing_acc', 'val_auc', 'val_acc', 'val_loss', 'loss']
+    fieldnames_order = ['experiment', 'epochs_trained', 'testing_auc', 'testing_acc', 'val_auc', 'val_acc', 'val_loss', 'loss']
     # Filter and order the found keys
     sorted_fieldnames = [f for f in fieldnames_order if f in all_keys]
     # Add any other keys that might have been found but are not in the predefined order
