@@ -4,12 +4,13 @@ Output Complete FlowMOP Tool
 
 This script processes all FCS files in a directory, filters events that passed 
 FlowMOP processing (passedfinal > 1), and exports them with a 'passfiltered' suffix.
-During export, all P$S values are set equal to their corresponding P$N values.
+It also outputs intermediate filtered files for debris, time, and doublet gates.
 """
 
 import argparse
 import logging
 from pathlib import Path
+from typing import Optional
 import numpy as np
 from fcsparser import parse
 import fcswrite
@@ -20,7 +21,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def output_complete_flowmop(input_directory: str, output_directory: str = None):
+def output_complete_flowmop(input_directory: str, output_directory: Optional[str] = None):
     """
     Process all FCS files in a directory to output complete FlowMOP results.
     
@@ -45,48 +46,68 @@ def output_complete_flowmop(input_directory: str, output_directory: str = None):
     processed_count = 0
     skipped_count = 0
     
+    filters_to_apply = [
+        {'name': 'passfiltered', 'columns': ['passedfinal']},
+        {'name': 'timepass', 'columns': ['passedtime', 'passedlod']},
+        {'name': 'debrispass', 'columns': ['passeddebris', 'passedlod']},
+        {'name': 'doubletpass', 'columns': ['passeddoublet', 'passedlod']},
+    ]
+
     for fcs_file in fcs_files:
         try:
             logger.info(f"Processing: {fcs_file.name}")
             
             meta, data = parse(fcs_file, reformat_meta=True)
+            file_processed_successfully = False
+
+            for f in filters_to_apply:
+                required_cols = f['columns']
+                if not all(col in data.columns for col in required_cols):
+                    logger.debug(
+                        f"Skipping filter {f['name']} for {fcs_file.name}, "
+                        f"missing one or more required columns: {required_cols}"
+                    )
+                    continue
+                
+                filter_condition = np.full(len(data), True, dtype=bool)
+                for col in required_cols:
+                    filter_condition &= (data[col] > 1)
+                
+                filtered_data = data[filter_condition]
+
+                if len(filtered_data) == 0:
+                    logger.warning(f"For filter {f['name']}, no events passed in {fcs_file.name}, skipping this filter.")
+                    continue
+                
+                logger.info(f"Filter {f['name']}: filtered {len(filtered_data)} events from {len(data)} total events")
+                
+                filter_output_path = output_path / f['name']
+                filter_output_path.mkdir(parents=True, exist_ok=True)
+                
+                output_file_path = filter_output_path / fcs_file.name
+                
+                channel_names = filtered_data.columns.tolist()
+                values = filtered_data.values
+                
+                text_kw_pr = {}
+                for i, channel_name in enumerate(channel_names):
+                    text_kw_pr[f'$P{i+1}S'] = channel_name
+                
+                fcswrite.write_fcs(
+                    filename=str(output_file_path),
+                    chn_names=channel_names,
+                    data=values,
+                    text_kw_pr=text_kw_pr
+                )
+                
+                logger.info(f"Successfully created: {output_file_path}")
+                file_processed_successfully = True
             
-            if 'passedfinal' not in data.columns:
-                logger.warning(f"No 'passedfinal' column found in {fcs_file.name}, skipping")
+            if file_processed_successfully:
+                processed_count += 1
+            else:
+                logger.warning(f"No filters could be applied to {fcs_file.name}, skipping file.")
                 skipped_count += 1
-                continue
-            
-            filtered_data = data[data['passedfinal'] > 1]
-            
-            if len(filtered_data) == 0:
-                logger.warning(f"No events passed final filter in {fcs_file.name}, skipping")
-                skipped_count += 1
-                continue
-            
-            logger.info(f"Filtered {len(filtered_data)} events from {len(data)} total events")
-            
-            output_filename = fcs_file.stem + "_passfiltered" + fcs_file.suffix
-            output_file_path = output_path / output_filename
-            
-            channel_names = filtered_data.columns.tolist()
-            values = filtered_data.values
-            
-            # Create text keywords to set P$S values equal to P$N values
-            text_kw_pr = {}
-            for i, channel_name in enumerate(channel_names):
-                # Set P$S equal to P$N (channel name)
-                text_kw_pr[f'$P{i+1}S'] = channel_name
-                logger.debug(f"Set $P{i+1}S = {channel_name}")
-            
-            fcswrite.write_fcs(
-                filename=str(output_file_path),
-                chn_names=channel_names,
-                data=values,
-                text_kw_pr=text_kw_pr
-            )
-            
-            logger.info(f"Successfully created: {output_file_path}")
-            processed_count += 1
             
         except Exception as e:
             logger.error(f"Error processing {fcs_file.name}: {str(e)}")
