@@ -71,12 +71,11 @@ def parse_log_file(log_file_path: Path):
         print(f"Error reading or processing file {log_file_path}: {e}")
         return None
 
-def main(root_dir: str, output_file: str):
+def main(root_dir: Path, output_file: Path):
     """
     Finds all training.log files, parses them, and writes results to a CSV.
     """
-    root_path = Path(root_dir)
-    log_files = list(root_path.rglob('training.log'))
+    log_files = list(root_dir.rglob('training.log'))
 
     if not log_files:
         print(f"No 'training.log' files found in '{root_dir}' and its subdirectories.")
@@ -119,8 +118,18 @@ def main(root_dir: str, output_file: str):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Parse training logs and aggregate results into a CSV file.")
-    parser.add_argument('--root_dir', type=str, help="The root directory to search for training.log files (e.g., 'exp').")
-    parser.add_argument('--output', type=str, default='training_results.csv', help="The path to the output CSV file.")
+    parser.add_argument(
+        '--root-directory', 
+        type=Path, 
+        required=True, 
+        help="The root directory to search for training.log files (e.g., 'exp')."
+    )
+    parser.add_argument(
+        '--output-file', 
+        type=Path, 
+        default=Path('training_results.csv'), 
+        help="The path to the output CSV file."
+    )
     args = parser.parse_args()
 
-    main(args.root_dir, args.output) 
+    main(args.root_directory, args.output_file) 
