@@ -63,16 +63,37 @@ def create_output_filename(files: List[str], proportions: List[float], output_di
     return os.path.join(output_dir, output_filename)
 
 
+def get_base_name(filepath: str) -> str:
+    """Extract base name from filepath, removing rep indicators and extensions."""
+    basename = os.path.splitext(os.path.basename(filepath))[0]
+    # Remove common rep indicators
+    base_clean = basename.replace('_rep1', '').replace('_rep2', '').replace('_rep3', '')
+    base_clean = base_clean.replace('_Rep1', '').replace('_Rep2', '').replace('_Rep3', '')
+    return base_clean
+
+
+def files_have_same_base(files: List[str]) -> bool:
+    """Check if any files in the list have the same base name."""
+    base_names = [get_base_name(f) for f in files]
+    return len(base_names) != len(set(base_names))
+
+
 def get_random_combinations(files: List[str], num_combinations: int, files_per_combo: int = 2) -> List[List[str]]:
-    """Generate random non-repeating combinations of files."""
-    all_combinations = list(combinations(files, files_per_combo))
+    """Generate random non-repeating combinations of files with different base names."""
+    # Filter out combinations where files have the same base name
+    valid_combinations = []
     
-    if len(all_combinations) < num_combinations:
-        print(f"Warning: Only {len(all_combinations)} unique combinations possible with {len(files)} files taken {files_per_combo} at a time.")
-        return [list(combo) for combo in all_combinations]
+    for combo in combinations(files, files_per_combo):
+        if not files_have_same_base(list(combo)):
+            valid_combinations.append(list(combo))
     
-    selected_combinations = random.sample(all_combinations, num_combinations)
-    return [list(combo) for combo in selected_combinations]
+    if len(valid_combinations) < num_combinations:
+        print(f"Warning: Only {len(valid_combinations)} valid combinations possible (excluding same base names).")
+        print(f"Requested {num_combinations}, returning all {len(valid_combinations)} valid combinations.")
+        return valid_combinations
+    
+    selected_combinations = random.sample(valid_combinations, num_combinations)
+    return selected_combinations
 
 
 def call_execute_script(files: List[str], proportions: List[float], output_file: str, 
