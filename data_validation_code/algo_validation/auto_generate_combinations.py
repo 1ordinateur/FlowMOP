@@ -71,16 +71,16 @@ def create_output_filename(files: List[str], proportions: List[float], output_di
     # Extract base names without extension and path
     base_names = [os.path.splitext(os.path.basename(f))[0] for f in files]
     
-    # Create combined name (e.g., B05_rep1 + B1_rep1 = B051)
     # Remove common suffixes like _rep1, _rep2, etc.
     clean_names = []
     for name in base_names:
         clean_name = name.replace('_rep1', '').replace('_rep2', '').replace('_rep3', '')
         clean_names.append(clean_name)
     
+    # Smush all names together (e.g., B05 + B1 + A3 = B05B1A3)
     combined_name = ''.join(clean_names)
     
-    # Create proportion string (e.g., 0.65, 0.35 -> 6535)
+    # Create proportion string with all proportions (e.g., 0.50, 0.30, 0.20 -> 503020)
     prop_str = ''.join([f"{int(p*100):02d}" for p in proportions])
     
     # Create final filename
@@ -177,7 +177,7 @@ def main():
     
     # Optional arguments
     parser.add_argument('--files-per-combo', type=int, default=2,
-                        help='Number of files per combination (default: 2).')
+                        help='Number of files per combination (default: 2, supports 2, 3, 4+).')
     parser.add_argument('--suffix', type=str, default='segment',
                         help='Suffix for output filenames (default: segment).')
     parser.add_argument('--min-proportion', type=float, default=0.1,
