@@ -263,7 +263,7 @@ echo "Output will be saved to $OUTPUT_DIR"
 
 # Run processes in parallel using GNU Parallel
 # Use python3 explicitly
-parallel --bar --jobs $MAX_PARALLEL python3 -u "$FLOWMOP_SCRIPT" {} $CMD_OPTIONS ::: "${FILES[@]}"
+parallel --bar --jobs $MAX_PARALLEL --halt never python3 -u "$FLOWMOP_SCRIPT" {} $CMD_OPTIONS ::: "${FILES[@]}"
 
 echo "Processing complete!"
 echo "Processed ${#FILES[@]} files"
