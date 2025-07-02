@@ -28,17 +28,42 @@ def find_fcs_files(directory: str) -> List[str]:
 
 
 def generate_random_proportions(num_files: int, min_prop: float = 0.1) -> List[float]:
-    """Generate random proportions that sum to 1.0."""
-    # Use Dirichlet distribution to generate proportions
+    """Generate random proportions that sum to 1.0 and are divisible by 5 (multiples of 0.05)."""
+    # Round min_prop to nearest 0.05
+    min_prop_rounded = max(0.05, round(min_prop / 0.05) * 0.05)
+    
+    # Start with random proportions using Dirichlet
     proportions = np.random.dirichlet(np.ones(num_files))
     
-    # Ensure minimum proportion for each file
-    proportions = np.maximum(proportions, min_prop)
-    
-    # Renormalize to sum to 1.0
+    # Apply minimum constraint
+    proportions = np.maximum(proportions, min_prop_rounded)
     proportions = proportions / proportions.sum()
     
-    return proportions.tolist()
+    # Round each proportion to nearest 0.05
+    proportions_rounded = [round(p / 0.05) * 0.05 for p in proportions]
+    
+    # Adjust to ensure they sum to exactly 1.0
+    total = sum(proportions_rounded)
+    diff = 1.0 - total
+    
+    # Distribute the difference in 0.05 increments
+    diff_units = round(diff / 0.05)
+    
+    if diff_units != 0:
+        # Randomly select which proportions to adjust
+        indices = list(range(num_files))
+        random.shuffle(indices)
+        
+        for i in range(abs(diff_units)):
+            idx = indices[i % num_files]
+            if diff_units > 0:
+                proportions_rounded[idx] += 0.05
+            else:
+                # Only subtract if it won't go below minimum
+                if proportions_rounded[idx] - 0.05 >= min_prop_rounded:
+                    proportions_rounded[idx] -= 0.05
+    
+    return proportions_rounded
 
 
 def create_output_filename(files: List[str], proportions: List[float], output_dir: str, suffix: str = "segment") -> str:
