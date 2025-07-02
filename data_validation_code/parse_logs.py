@@ -18,14 +18,15 @@ def parse_log_file(log_file_path: Path):
 
         # Split the log file by '**** Start Training ****' to handle multiple runs
         training_runs = content.split('**** Start Training ****')
-        if not training_runs:
+        if len(training_runs) < 2:
+            # If there's no 'Start Training' marker, there's no complete run to parse.
             return None
 
-        # Process the first training run
-        first_run_content = training_runs[0]
+        # Process the last training run in the file
+        last_run_content = training_runs[-1]
 
         # Check for early stopping first
-        early_stop_match = re.search(r'Training early stops at epoch: (\d+)', first_run_content)
+        early_stop_match = re.search(r'Training early stops at epoch: (\d+)', last_run_content)
         if early_stop_match:
             try:
                 epochs_trained = int(early_stop_match.group(1))
@@ -33,7 +34,7 @@ def parse_log_file(log_file_path: Path):
                 pass  # Should not happen with the regex but good to be safe
 
         # Find the last epoch stats
-        epoch_stats_matches = re.findall(r"Epoch stats: (\{.*\})", first_run_content)
+        epoch_stats_matches = re.findall(r"Epoch stats: (\{.*\})", last_run_content)
         if epoch_stats_matches:
             try:
                 # The last match is what we need
@@ -51,7 +52,7 @@ def parse_log_file(log_file_path: Path):
                 pass  # Ignore malformed dictionaries
 
         # Find testing stats
-        testing_stats_match = re.search(r'Testing Acc: ([\d.eE-]+), Testing Auc: ([\d.eE-]+)', first_run_content)
+        testing_stats_match = re.search(r'Testing Acc: ([\d.eE-]+), Testing Auc: ([\d.eE-]+)', last_run_content)
         if testing_stats_match:
             try:
                 testing_stats['testing_acc'] = float(testing_stats_match.group(1))
@@ -76,6 +77,7 @@ def main(root_dir: Path, output_file: Path):
     Finds all training.log files, parses them, and writes results to a CSV.
     """
     log_files = list(root_dir.rglob('training.log'))
+    print(f"Found {len(log_files)} log files in {root_dir}")
 
     if not log_files:
         print(f"No 'training.log' files found in '{root_dir}' and its subdirectories.")

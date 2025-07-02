@@ -54,63 +54,59 @@ def output_complete_flowmop(input_directory: str, output_directory: Optional[str
     ]
 
     for fcs_file in fcs_files:
-        try:
-            logger.info(f"Processing: {fcs_file.name}")
-            
-            meta, data = parse(fcs_file, reformat_meta=True)
-            file_processed_successfully = False
+        logger.info(f"Processing: {fcs_file.name}")
+        
+        meta, data = parse(fcs_file, reformat_meta=True)
+        file_processed_successfully = False
 
-            for f in filters_to_apply:
-                required_cols = f['columns']
-                if not all(col in data.columns for col in required_cols):
-                    logger.debug(
-                        f"Skipping filter {f['name']} for {fcs_file.name}, "
-                        f"missing one or more required columns: {required_cols}"
-                    )
-                    continue
-                
-                filter_condition = np.full(len(data), True, dtype=bool)
-                for col in required_cols:
-                    filter_condition &= (data[col] > 1)
-                
-                filtered_data = data[filter_condition]
-
-                if len(filtered_data) == 0:
-                    logger.warning(f"For filter {f['name']}, no events passed in {fcs_file.name}, skipping this filter.")
-                    continue
-                
-                logger.info(f"Filter {f['name']}: filtered {len(filtered_data)} events from {len(data)} total events")
-                
-                filter_output_path = output_path / f['name']
-                filter_output_path.mkdir(parents=True, exist_ok=True)
-                
-                output_file_path = filter_output_path / fcs_file.name
-                
-                channel_names = filtered_data.columns.tolist()
-                values = filtered_data.values
-                
-                text_kw_pr = {}
-                for i, channel_name in enumerate(channel_names):
-                    text_kw_pr[f'$P{i+1}S'] = channel_name
-                
-                fcswrite.write_fcs(
-                    filename=str(output_file_path),
-                    chn_names=channel_names,
-                    data=values,
-                    text_kw_pr=text_kw_pr
+        for f in filters_to_apply:
+            required_cols = f['columns']
+            if not all(col in data.columns for col in required_cols):
+                logger.warning(
+                    f"Skipping filter {f['name']} for {fcs_file.name}, "
+                    f"missing one or more required columns: {required_cols}"
+                    f"Data columns: {data.columns.tolist()}"
                 )
-                
-                logger.info(f"Successfully created: {output_file_path}")
-                file_processed_successfully = True
+                continue
             
-            if file_processed_successfully:
-                processed_count += 1
-            else:
-                logger.warning(f"No filters could be applied to {fcs_file.name}, skipping file.")
-                skipped_count += 1
+            filter_condition = np.full(len(data), True, dtype=bool)
+            for col in required_cols:
+                filter_condition &= (data[col] > 1)
             
-        except Exception as e:
-            logger.error(f"Error processing {fcs_file.name}: {str(e)}")
+            filtered_data = data[filter_condition]
+
+            if len(filtered_data) == 0:
+                logger.warning(f"For filter {f['name']}, no events passed in {fcs_file.name}, skipping this filter.")
+                continue
+            
+            logger.info(f"Filter {f['name']}: filtered {len(filtered_data)} events from {len(data)} total events")
+            
+            filter_output_path = output_path / f['name']
+            filter_output_path.mkdir(parents=True, exist_ok=True)
+            
+            output_file_path = filter_output_path / fcs_file.name
+            
+            channel_names = filtered_data.columns.tolist()
+            values = filtered_data.values
+            
+            text_kw_pr = {}
+            for i, channel_name in enumerate(channel_names):
+                text_kw_pr[f'$P{i+1}S'] = channel_name
+            
+            fcswrite.write_fcs(
+                filename=str(output_file_path),
+                chn_names=channel_names,
+                data=values,
+                text_kw_pr=text_kw_pr
+            )
+            
+            logger.info(f"Successfully created: {output_file_path}")
+            file_processed_successfully = True
+        
+        if file_processed_successfully:
+            processed_count += 1
+        else:
+            logger.warning(f"No filters could be applied to {fcs_file.name}, skipping file.")
             skipped_count += 1
     
     logger.info(f"Processing complete: {processed_count} files processed, {skipped_count} files skipped")
@@ -119,7 +115,7 @@ def main():
     """Parse arguments and run the script."""
     parser = argparse.ArgumentParser(description='Output complete FlowMOP results with passedfinal filtering')
     
-    parser.add_argument('input_directory', help='Directory containing FCS files')
+    parser.add_argument('-i', '--input-directory', help='Directory containing FCS files')
     parser.add_argument('-o', '--output-directory', help='Output directory (defaults to input directory)')
     
     args = parser.parse_args()
