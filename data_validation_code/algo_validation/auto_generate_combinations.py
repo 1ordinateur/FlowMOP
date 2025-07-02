@@ -189,7 +189,7 @@ def main():
     parser.add_argument('--time-channel', type=str, default='Time',
                         help='Name of the time channel in FCS files (default: Time).')
     parser.add_argument('--script-path', type=str, 
-                        default='./execute_time_gate_disturbance.py',
+                        default='/g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/execute_time_gate_disturbance.py',
                         help='Path to execute_time_gate_disturbance.py script.')
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed for reproducible results.')
