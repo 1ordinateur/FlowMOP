@@ -41,7 +41,7 @@ python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_gener
 --num-combinations 15 \
 --files-per-combo 2 \
 --enable-mixing \
---mixing-chunk-size 2000 &
+--mixing-chunk-size 3000 &
 
 python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_generate_combinations.py \
 --input-dir /g/data/eu59/data_flowmop/staining_trials/stain_b \
@@ -50,7 +50,7 @@ python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_gener
 --num-combinations 15 \
 --files-per-combo 2 \
 --enable-mixing \
---mixing-chunk-size 2000 &
+--mixing-chunk-size 3000 &
 
 python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_generate_combinations.py \
 --input-dir /g/data/eu59/data_flowmop/staining_trials/stain_c \
@@ -59,7 +59,7 @@ python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_gener
 --num-combinations 15 \
 --files-per-combo 2 \
 --enable-mixing \
---mixing-chunk-size 2000 &
+--mixing-chunk-size 3000 &
 
 # Trimix
 python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_generate_combinations.py \
@@ -69,7 +69,7 @@ python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_gener
 --num-combinations 15 \
 --files-per-combo 3 \
 --enable-mixing \
---mixing-chunk-size 2000 &
+--mixing-chunk-size 3000 &
 
 python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_generate_combinations.py \
 --input-dir /g/data/eu59/data_flowmop/staining_trials/stain_b \
@@ -78,7 +78,7 @@ python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_gener
 --num-combinations 15 \
 --files-per-combo 3 \
 --enable-mixing \
---mixing-chunk-size 2000 &
+--mixing-chunk-size 3000 &
 
 python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_generate_combinations.py \
 --input-dir /g/data/eu59/data_flowmop/staining_trials/stain_c \
@@ -87,6 +87,6 @@ python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_gener
 --num-combinations 15 \
 --files-per-combo 3 \
 --enable-mixing \
---mixing-chunk-size 2000 & 
+--mixing-chunk-size 3000 & 
 
 wait

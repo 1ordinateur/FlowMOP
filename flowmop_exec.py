@@ -136,7 +136,10 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
         enable_plots=enable_plots,
         plots_dir=plots_dir,
         enable_ssc=enable_ssc,
-        remove_beads=remove_beads
+        remove_beads=remove_beads,
+        skip_debris=skip_debris,
+        skip_time=skip_time,
+        skip_doublets=skip_doublets
     )
     
     # Process the data
@@ -186,6 +189,10 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
         # Preserve ALL original metadata
         if meta:
             for key, value in meta.items():
+                # Filter out fcsparser internal keys and structural FCS keywords
+                # that might conflict with fcswrite's own keyword generation.
+                if str(key).startswith(('_', '$')):
+                    continue
                 # Convert all values to strings for FCS compatibility
                 if isinstance(value, (list, tuple)):
                     complete_metadata[str(key)] = str(value)
