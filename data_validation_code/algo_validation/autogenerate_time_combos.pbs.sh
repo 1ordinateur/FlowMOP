@@ -1,4 +1,3 @@
-
 #!/bin/bash
 
 #PBS -N autogen_sample_combos
@@ -19,24 +18,28 @@ module use /g/data/dk92/apps/Modules/modulefiles/; module load NCI-data-analysis
 python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_generate_combinations.py \
 --input-dir /g/data/eu59/data_flowmop/staining_trials/stain_a \
 --output-dir /g/data/eu59/data_flowmop/fig_2_timegate_combos \
---num-combinations 15 \ & 
+--num-combinations 15 \
+--files-per-combo 2 \ & 
 
 python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_generate_combinations.py \
 --input-dir /g/data/eu59/data_flowmop/staining_trials/stain_b \
 --output-dir /g/data/eu59/data_flowmop/fig_2_timegate_combos \
---num-combinations 15 \ & 
+--num-combinations 15 \
+--files-per-combo 2 \ & 
 
 python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_generate_combinations.py \
 --input-dir /g/data/eu59/data_flowmop/staining_trials/stain_c \
 --output-dir /g/data/eu59/data_flowmop/fig_2_timegate_combos \
---num-combinations 15 \ & 
+--num-combinations 15 \
+--files-per-combo 2 \ & 
 
 # Bimix
 python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_generate_combinations.py \
 --input-dir /g/data/eu59/data_flowmop/staining_trials/stain_a \
 --output-dir /g/data/eu59/data_flowmop/fig_2_timegate_combos \
 --suffix bimix \
---num-combinations 15 \ 
+--num-combinations 15 \
+--files-per-combo 2 \
 --enable-mixing \
 --mixing-chunk-size 2000 &
 
@@ -44,7 +47,8 @@ python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_gener
 --input-dir /g/data/eu59/data_flowmop/staining_trials/stain_b \
 --output-dir /g/data/eu59/data_flowmop/fig_2_timegate_combos \
 --suffix bimix \
---num-combinations 15 \ 
+--num-combinations 15 \
+--files-per-combo 2 \
 --enable-mixing \
 --mixing-chunk-size 2000 &
 
@@ -52,7 +56,8 @@ python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_gener
 --input-dir /g/data/eu59/data_flowmop/staining_trials/stain_c \
 --output-dir /g/data/eu59/data_flowmop/fig_2_timegate_combos \
 --suffix bimix \
---num-combinations 15 \ 
+--num-combinations 15 \
+--files-per-combo 2 \
 --enable-mixing \
 --mixing-chunk-size 2000 &
 
@@ -61,7 +66,7 @@ python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_gener
 --input-dir /g/data/eu59/data_flowmop/staining_trials/stain_a \
 --output-dir /g/data/eu59/data_flowmop/fig_2_timegate_combos \
 --suffix trimix \
---num-combinations 15 \ 
+--num-combinations 15 \
 --files-per-combo 3 \
 --enable-mixing \
 --mixing-chunk-size 2000 &
@@ -70,7 +75,7 @@ python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_gener
 --input-dir /g/data/eu59/data_flowmop/staining_trials/stain_b \
 --output-dir /g/data/eu59/data_flowmop/fig_2_timegate_combos \
 --suffix trimix \
---num-combinations 15 \ 
+--num-combinations 15 \
 --files-per-combo 3 \
 --enable-mixing \
 --mixing-chunk-size 2000 &
@@ -79,7 +84,7 @@ python3 /g/data/eu59/FlowMOP/src/data_validation_code/algo_validation/auto_gener
 --input-dir /g/data/eu59/data_flowmop/staining_trials/stain_c \
 --output-dir /g/data/eu59/data_flowmop/fig_2_timegate_combos \
 --suffix trimix \
---num-combinations 15 \ 
+--num-combinations 15 \
 --files-per-combo 3 \
 --enable-mixing \
 --mixing-chunk-size 2000 & 

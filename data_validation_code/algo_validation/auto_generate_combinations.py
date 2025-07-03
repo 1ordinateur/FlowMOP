@@ -177,7 +177,7 @@ def main():
     
     # Optional arguments
     parser.add_argument('--files-per-combo', type=int, default=2,
-                        help='Number of files per combination (default: 2, supports 2, 3, 4+).')
+                        help='Number of files per combination (default: 2, supports 2, 3, etc.).')
     parser.add_argument('--suffix', type=str, default='segment',
                         help='Suffix for output filenames (default: segment).')
     parser.add_argument('--min-proportion', type=float, default=0.1,
@@ -200,6 +200,9 @@ def main():
     if args.seed is not None:
         random.seed(args.seed)
         np.random.seed(args.seed)
+    
+    if args.enable_mixing and args.files_per_combo <= 1:
+        parser.error("--enable-mixing requires --files-per-combo to be greater than 1.")
     
     # Find FCS files
     print(f"Searching for FCS files in {args.input_dir}...")
