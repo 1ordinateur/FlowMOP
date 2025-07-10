@@ -90,14 +90,20 @@ module use /g/data/dk92/apps/Modules/modulefiles/; module load NCI-data-analysis
 #     --skip-debris \
 #     --skip-time
 
-# FlowMOP/src/parallel_flowmop.sh \
-#     --input-dir /g/data/eu59/data_flowmop/cleaned_compiled_fig_2_dataset/ \
-#     --output-dir /g/data/eu59/data_flowmop/cleaned_compiled_fig_2_dataset_flowmopped/ 
+FlowMOP/src/parallel_flowmop.sh \
+    --input-dir /g/data/eu59/data_flowmop/cleaned_compiled_fig_2_dataset/ \
+    --output-dir /g/data/eu59/data_flowmop/cleaned_compiled_fig_2_dataset_flowmopped/ 
 
 # FlowMOP/src/parallel_flowmop.sh \
 #     --input-dir /g/data/eu59/data_flowmop/cleaned_compiled_fig_3_dataset/ \
 #     --output-dir /g/data/eu59/data_flowmop/cleaned_compiled_fig_3_dataset_flowmopped/ 
 
-FlowMOP/src/parallel_flowmop.sh \
-    --input-dir /g/data/eu59/data_flowmop/fig_2_timegate_combos/ \
-    --output-dir /g/data/eu59/data_flowmop/fig_2_timegate_combos_flowmopped/ 
+# FlowMOP/src/parallel_flowmop.sh \
+#     --input-dir /g/data/eu59/data_flowmop/fig_2_timegate_combos/ \
+#     --output-dir /g/data/eu59/data_flowmop/fig_2_timegate_combos_flowmopped/ & 
+
+# FlowMOP/src/parallel_flowmop.sh \
+#     --input-dir /g/data/eu59/data_flowmop/fig_2_timegate_combos_smallcut/ \
+#     --output-dir /g/data/eu59/data_flowmop/fig_2_timegate_combos_smallcut_flowmopped/ & 
+
+wait

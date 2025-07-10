@@ -89,15 +89,26 @@ def output_complete_flowmop(input_directory: str, output_directory: Optional[str
             channel_names = filtered_data.columns.tolist()
             values = filtered_data.values
             
-            text_kw_pr = {}
+            new_meta = {}
+            for key, value in meta.items():
+                # Filter out fcsparser internal keys and structural FCS keywords
+                # that might conflict with fcswrite's own keyword generation.
+                if str(key).startswith(('_', '$')):
+                    continue
+                # Convert all values to strings for FCS compatibility
+                if isinstance(value, (list, tuple)):
+                    new_meta[str(key)] = str(value)
+                elif value is not None:
+                    new_meta[str(key)] = str(value)
+
             for i, channel_name in enumerate(channel_names):
-                text_kw_pr[f'$P{i+1}S'] = channel_name
+                new_meta[f'$P{i+1}S'] = channel_name
             
             fcswrite.write_fcs(
                 filename=str(output_file_path),
                 chn_names=channel_names,
                 data=values,
-                text_kw_pr=text_kw_pr
+                text_kw_pr=new_meta
             )
             
             logger.info(f"Successfully created: {output_file_path}")

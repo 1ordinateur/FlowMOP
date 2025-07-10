@@ -200,6 +200,7 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
                     complete_metadata[str(key)] = str(value)
 
         # Add FlowMOP processing metadata
+        complete_metadata['FILENAME'] = str(fcs_output_file)
         complete_metadata['flowmop_processed'] = 'true'
         complete_metadata['flowmop_processing_date'] = datetime.now().isoformat()
         complete_metadata['flowmop_original_file'] = str(file_path)
