@@ -1,49 +1,230 @@
-import numpy as np
-import pandas as pd
 import argparse
 from pathlib import Path
-import fcsparser
-import flowmop_new
-import dask.array as da
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 import os
 
-def load_data(file_path: str) -> tuple:
+import numpy as np
+import pandas as pd
+import fcsparser
+import flowmop_new
+
+
+def _stringify_meta_value(value: Any) -> str:
+    """Convert metadata values to strings for FCS writing."""
+    if isinstance(value, (list, tuple)):
+        return ','.join(str(v) for v in value)
+    return str(value)
+
+
+def _clean_metadata(
+    meta_raw: Dict[str, Any],
+    drop_parameter_keywords: bool = True,
+    set_total_events: Optional[int] = None,
+) -> Dict[str, str]:
     """
-    Load data from either FCS or Parquet file with complete metadata extraction.
+    Build a metadata dict for output, preserving original keys except those that
+    are structural or internal. Structural channel definitions can be dropped
+    to let fcswrite regenerate them based on the provided data.
+    """
+    structural_to_strip = {
+        '$BEGINDATA',
+        '$ENDDATA',
+        '$BEGINTEXT',
+        '$ENDTEXT',
+        '$BEGINANALYSIS',
+        '$ENDANALYSIS',
+        '$NEXTDATA',
+    }
+
+    cleaned: Dict[str, str] = {}
+    for key, value in meta_raw.items():
+        if key is None:
+            continue
+        key_str = str(key)
+        key_upper = key_str.upper()
+
+        # Skip internal/helper keys
+        if key_str.startswith('_'):
+            continue
+
+        # Skip low-level structural offsets
+        if key_upper in structural_to_strip:
+            continue
+
+        # Skip parameter definitions when we let fcswrite rebuild them
+        if drop_parameter_keywords and (key_upper.startswith('$P') or key_upper == '$PAR'):
+            continue
+
+        if value is None:
+            continue
+
+        cleaned[key_str] = _stringify_meta_value(value)
+
+    if set_total_events is not None:
+        cleaned['$TOT'] = str(set_total_events)
+
+    return cleaned
+
+
+def _derive_canonical_channel_names(
+    meta_raw: Dict[str, Any],
+    fallback_columns: List[str],
+) -> List[str]:
+    """
+    Recover canonical channel order from $PnN/$PnS keys. Falls back to the
+    provided columns if metadata is incomplete.
+    """
+    meta_lower = {str(k).lower(): v for k, v in meta_raw.items()}
+    par_count = meta_lower.get('$par')
+    try:
+        par_count = int(par_count)
+    except (TypeError, ValueError):
+        par_count = len(fallback_columns)
+
+    names: List[str] = []
+    for i in range(1, par_count + 1):
+        name = meta_lower.get(f'$p{i}n')
+        if name is None:
+            name = meta_lower.get(f'$p{i}s')
+
+        if name is None and i - 1 < len(fallback_columns):
+            name = fallback_columns[i - 1]
+        if name is None:
+            name = f'P{i}'
+
+        names.append(str(name))
+
+    return names
+
+
+def _ensure_numpy(vector: Any) -> np.ndarray:
+    """Convert a vector that may be a Dask array to a NumPy array."""
+    if hasattr(vector, "compute"):
+        return np.asarray(vector.compute())
+    return np.asarray(vector)
+
+
+def write_filtered_fcs_files(
+    base_output_dir: Path,
+    base_name: str,
+    output_df: pd.DataFrame,
+    meta_raw: Dict[str, Any],
+) -> None:
+    """
+    Optionally emit filtered FCS files (subset of events) based on gate columns.
+    This is an opt-in pathway and should not be used for the canonical output.
+    """
+    filters_to_apply = [
+        {'name': 'passfiltered', 'columns': ['passed_final']},
+        {'name': 'timepass', 'columns': ['passed_time', 'passed_lod']},
+        {'name': 'debrispass', 'columns': ['passed_debris', 'passed_lod']},
+        {'name': 'doubletpass', 'columns': ['passed_doublet', 'passed_lod']},
+    ]
+
+    import fcswrite
+
+    for filter_def in filters_to_apply:
+        required_cols = filter_def['columns']
+        if not all(col in output_df.columns for col in required_cols):
+            print(
+                f"Skipping filter {filter_def['name']} for {base_name}: "
+                f"missing columns {required_cols}"
+            )
+            continue
+
+        mask = np.ones(len(output_df), dtype=bool)
+        for col in required_cols:
+            mask &= output_df[col].values > 0
+
+        filtered_df = output_df.loc[mask]
+        if filtered_df.empty:
+            print(f"Filter {filter_def['name']}: no events passed for {base_name}, skipping.")
+            continue
+
+        filter_output_path = base_output_dir / filter_def['name']
+        filter_output_path.mkdir(parents=True, exist_ok=True)
+        output_file_path = filter_output_path / f"{base_name}.fcs"
+
+        filtered_meta = _clean_metadata(
+            meta_raw=meta_raw,
+            drop_parameter_keywords=True,
+            set_total_events=len(filtered_df),
+        )
+        filtered_meta['flowmop_filtered'] = 'true'
+        filtered_meta['flowmop_filtered_type'] = filter_def['name']
+        filtered_meta['flowmop_filtered_source'] = f"flowmop_{base_name}.fcs"
+
+        fcswrite.write_fcs(
+            filename=str(output_file_path),
+            chn_names=filtered_df.columns.tolist(),
+            data=filtered_df.values,
+            text_kw_pr=filtered_meta,
+            compat_chn_names=True,
+            compat_copy=True,
+            compat_negative=True,
+            compat_percent=True,
+        )
+
+        print(
+            f"Created filtered file {output_file_path} "
+            f"with {len(filtered_df)} events ({filter_def['name']})"
+        )
+
+def load_data(file_path: str) -> Tuple[Dict[str, Any], pd.DataFrame, List[str]]:
+    """
+    Load data from either FCS or Parquet file, capturing a raw metadata view and
+    a DataFrame for processing.
     
     Args:
         file_path: Path to the data file
         
     Returns:
-        tuple: (meta, data_frame, original_channel_info)
+        tuple: (meta_raw, data_frame, canonical_channel_names)
     """
     file_path = Path(file_path)
-    original_channel_info = {}
     
     if file_path.suffix.lower() == '.fcs':
         print(f"Loading FCS file: {file_path}")
-        # Extract ALL metadata including channel information
-        meta, data = fcsparser.parse(file_path, reformat_meta=True)
+        # Raw metadata and data (unreformatted)
+        meta_raw, data = fcsparser.parse(file_path, reformat_meta=False)
+
+        # Ensure we have a DataFrame for processing
+        if isinstance(data, pd.DataFrame):
+            data_df = data.copy()
+        else:
+            data_df = pd.DataFrame(data)
+
+        # Recover canonical channel names from metadata
+        canonical_channel_names = _derive_canonical_channel_names(
+            meta_raw,
+            list(data_df.columns),
+        )
+
+        # Align DataFrame columns to canonical names if lengths match
+        if len(canonical_channel_names) == len(data_df.columns):
+            data_df = data_df.copy()
+            data_df.columns = canonical_channel_names
+        else:
+            canonical_channel_names = list(data_df.columns)
+
+        print(
+            f"Extracted {len(meta_raw)} metadata fields "
+            f"and {len(canonical_channel_names)} channels"
+        )
+        return meta_raw, data_df, canonical_channel_names
         
-        # Extract comprehensive channel information for preservation
-        original_channel_info = {}
-        for key, value in meta.items():
-            if key.startswith('$P') or key.startswith('_channel_names_') or 'channel' in key.lower():
-                original_channel_info[key] = value
-                
-        print(f"Extracted {len(meta)} metadata fields and {len(original_channel_info)} channel-related fields")
-        
-    elif file_path.suffix.lower() == '.parquet':
+    if file_path.suffix.lower() == '.parquet':
         print(f"Loading Parquet file: {file_path}")
-        data = pd.read_parquet(file_path)
-        # Create minimal metadata for parquet files
-        meta = {'__file_type__': 'parquet', '__original_file__': str(file_path)}
+        data_df = pd.read_parquet(file_path)
+        meta_raw = {'__file_type__': 'parquet', '__original_file__': str(file_path)}
+        canonical_channel_names = list(data_df.columns)
+        return meta_raw, data_df, canonical_channel_names
         
-    else:
-        raise ValueError(f"Unsupported file format: {file_path.suffix} for file {file_path}. Supported formats are .fcs and .parquet")
-    
-    return meta, data, original_channel_info
+    raise ValueError(
+        f"Unsupported file format: {file_path.suffix} for file {file_path}. "
+        "Supported formats are .fcs and .parquet"
+    )
 
 def filter_numerical_columns(data: pd.DataFrame) -> pd.DataFrame:
     """
@@ -68,12 +249,27 @@ def filter_numerical_columns(data: pd.DataFrame) -> pd.DataFrame:
     
     return data[numerical_cols]
 
-def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'positives', 
-                mad_smoothing: list = None, enable_plots: bool = False, plots_dir: str = "time_gate_plots",
-                enable_ssc: bool = False, remove_beads: bool = False,
-                skip_debris: bool = False, skip_time: bool = False, skip_doublets: bool = False,
-                remove_zeros: bool = True, min_cells: int = 1000, max_bins: int = 600,
-                step_val: int = 200, mad_factor: int = 3, enable_dask: bool = True) -> None:
+def process_file(
+    file_path: str,
+    output_dir: Optional[str] = None,
+    fluor_mode: str = 'positives', 
+    mad_smoothing: Optional[List[float]] = None,
+    enable_plots: bool = False,
+    plots_dir: str = "time_gate_plots",
+    enable_ssc: bool = False,
+    remove_beads: bool = False,
+    skip_debris: bool = False,
+    skip_time: bool = False,
+    skip_doublets: bool = False,
+    remove_zeros: bool = True,
+    min_cells: int = 1000,
+    max_bins: int = 600,
+    step_val: int = 200,
+    mad_factor: int = 3,
+    enable_dask: bool = True,
+    export_filtered_fcs: bool = False,
+    filtered_output_dir: Optional[str] = None,
+) -> None:
     """
     Process a data file through the FlowMOP pipeline.
     
@@ -99,17 +295,19 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
         step_val: Step size for binning
         mad_factor: Factor for MAD calculation for gating
         enable_dask: Whether to use Dask for parallel processing
+        export_filtered_fcs: If True, also emit filtered/subset FCS files
+        filtered_output_dir: Optional directory for filtered FCS (defaults to output_dir or input dir)
     """
     # Load data file with complete metadata extraction
-    meta, data, original_channel_info = load_data(file_path)
+    meta_raw, data_df, _canonical_channel_names = load_data(file_path)
     
     # Filter to keep only numerical columns
-    data = filter_numerical_columns(data)
-    print(f"Processing {len(data.columns)} numerical columns: {', '.join(data.columns)}")
+    data_df = filter_numerical_columns(data_df)
+    print(f"Processing {len(data_df.columns)} numerical columns: {', '.join(data_df.columns)}")
     
     # Convert data to numpy array and get channel names
-    fcs_array = data.values
-    marker_names = list(data.columns)
+    fcs_array = data_df.values
+    marker_names = list(data_df.columns)
     
     # Find Time channel index if it exists
     time_channel_index = None
@@ -157,15 +355,27 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
         print("Skipping doublet filtering.")
         vectors['doublet'] = np.ones_like(vectors['doublet'])
 
+    # Ensure vectors are NumPy arrays for downstream use
+    vectors = {name: _ensure_numpy(vec) for name, vec in vectors.items()}
+
     print("Original events:", len(fcs_array))
-    print("processed events lod:", len(fcs_array[vectors['lod'] == 1]))
-    print("processed events debris:", len(fcs_array[vectors['debris'] == 1]))
-    print("processed events time:", len(fcs_array[vectors['time'] == 1]))
-    print("processed events doublets:", len(fcs_array[vectors['doublet'] == 1]))
+    print("processed events lod:", int((vectors['lod'] == 1).sum()))
+    print("processed events debris:", int((vectors['debris'] == 1).sum()))
+    print("processed events time:", int((vectors['time'] == 1).sum()))
+    print("processed events doublets:", int((vectors['doublet'] == 1).sum()))
     
     # Calculate events that pass all filters
-    all_passed = (vectors['lod'] > 0) & (vectors['debris'] > 0) & (vectors['time'] > 0) & (vectors['doublet'] > 0)
-    print(f"Events passing all filters: {len(fcs_array[all_passed])} ({(len(fcs_array[all_passed])/len(fcs_array)*100):.1f}% retained)")
+    all_passed = (
+        (vectors['lod'] > 0) &
+        (vectors['debris'] > 0) &
+        (vectors['time'] > 0) &
+        (vectors['doublet'] > 0)
+    )
+    passed_count = int(all_passed.sum())
+    print(f"Events passing all filters: {passed_count} ({(passed_count/len(fcs_array)*100):.1f}% retained)")
+    
+    if export_filtered_fcs and not output_dir:
+        print("export_filtered_fcs requested but no output_dir provided; skipping filtered outputs.")
     
     # Export results if output directory specified
     if output_dir:
@@ -179,28 +389,22 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
         # Create a pandas DataFrame with the original data
         output_df = pd.DataFrame(fcs_array, columns=marker_names)
         
-        # Add filter vectors as additional columns
+        # Add filter vectors as additional columns (appended after original channels)
         for name, vector in vectors.items():
-            output_df[f'passed_{name}'] = vector.astype(int)
+            col_name = f'passed_{name}'
+            if col_name in output_df.columns:
+                continue
+            output_df[col_name] = vector.astype(int)
         
-        # Prepare complete metadata for preservation
-        complete_metadata = {}
-
-        # Preserve ALL original metadata
-        if meta:
-            for key, value in meta.items():
-                # Filter out fcsparser internal keys and structural FCS keywords
-                # that might conflict with fcswrite's own keyword generation.
-                if str(key).startswith(('_', '$')):
-                    continue
-                # Convert all values to strings for FCS compatibility
-                if isinstance(value, (list, tuple)):
-                    complete_metadata[str(key)] = str(value)
-                elif value is not None:
-                    complete_metadata[str(key)] = str(value)
+        # Prepare metadata: start from raw, strip structural parameter defs, keep other keys
+        complete_metadata = _clean_metadata(
+            meta_raw=meta_raw,
+            drop_parameter_keywords=True,
+            set_total_events=len(output_df),
+        )
 
         # Add FlowMOP processing metadata
-        complete_metadata['FILENAME'] = str(fcs_output_file)
+        complete_metadata['flowmop_output_filename'] = str(fcs_output_file)
         complete_metadata['flowmop_processed'] = 'true'
         complete_metadata['flowmop_processing_date'] = datetime.now().isoformat()
         complete_metadata['flowmop_original_file'] = str(file_path)
@@ -211,17 +415,17 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
         complete_metadata['flowmop_step_val'] = str(step_val)
         complete_metadata['flowmop_mad_factor'] = str(mad_factor)
         complete_metadata['flowmop_events_original'] = str(len(fcs_array))
-        complete_metadata['flowmop_events_final'] = str(len(fcs_array[all_passed]))
-        complete_metadata['flowmop_retention_percent'] = f"{(len(fcs_array[all_passed])/len(fcs_array)*100):.2f}"
+        complete_metadata['flowmop_events_final'] = str(passed_count)
+        complete_metadata['flowmop_retention_percent'] = f"{(passed_count/len(fcs_array)*100):.2f}"
         
         # Add filter statistics
         for name, vector in vectors.items():
-            complete_metadata[f'flowmop_{name}_passed'] = str(len(fcs_array[vector == 1]))
-            complete_metadata[f'flowmop_{name}_percent'] = f"{(len(fcs_array[vector == 1])/len(fcs_array)*100):.2f}"
+            complete_metadata[f'flowmop_{name}_passed'] = str(int((vector == 1).sum()))
+            complete_metadata[f'flowmop_{name}_percent'] = f"{(int((vector == 1).sum())/len(fcs_array)*100):.2f}"
         
-        # Write to FCS file with complete metadata preservation
+        # Write to FCS file with metadata preservation
         print(f"Exporting to FCS file: {fcs_output_file}")
-        print(f"Preserving {len(complete_metadata)} metadata fields")
+        print(f"Preserving {len(complete_metadata)} metadata fields (excluding structural channel defs)")
         
         import fcswrite
         # Extract data and channel names from the DataFrame
@@ -232,14 +436,24 @@ def process_file(file_path: str, output_dir: str = None, fluor_mode: str = 'posi
             filename=str(fcs_output_file), 
             chn_names=output_channel_names,
             data=output_data,
-            text_kw_pr=complete_metadata,  # ALL metadata preserved here
+            text_kw_pr=complete_metadata,
             compat_chn_names=True,
             compat_copy=True,
             compat_negative=True,
             compat_percent=True
         )
-        print(f"Successfully exported data with complete metadata to: {fcs_output_file}")
-        print(f"Metadata fields preserved: {len(complete_metadata)}")
+        print(f"Successfully exported data with metadata to: {fcs_output_file}")
+        print(f"Metadata fields preserved (after FlowMOP additions): {len(complete_metadata)}")
+
+        # Optionally emit filtered/subset FCS files
+        if export_filtered_fcs:
+            subset_dir = Path(filtered_output_dir) if filtered_output_dir else output_path
+            write_filtered_fcs_files(
+                base_output_dir=subset_dir,
+                base_name=base_name,
+                output_df=output_df,
+                meta_raw=meta_raw,
+            )
 
 def main():
     parser = argparse.ArgumentParser(description='Process data files through FlowMOP pipeline')
@@ -266,6 +480,10 @@ def main():
     parser.add_argument('--mad-factor', type=int, default=4, help='Factor for MAD calculation for gating (default: 4)')
     parser.add_argument('--disable-remove-zeros', action='store_false', dest='remove_zeros', help='Disable removal of zero values (zeros are removed by default)')
     parser.add_argument('--disable-dask', action='store_false', dest='enable_dask', help='Disable Dask for parallel processing (Dask is enabled by default)')
+    parser.add_argument('--export-filtered-fcs', action='store_true', default=False,
+                        help='Also emit filtered FCS files (subsetted events) in addition to the annotated output')
+    parser.add_argument('--filtered-output-dir', type=str,
+                        help='Optional directory for filtered FCS files (defaults to output dir)')
     parser.set_defaults(remove_zeros=True, enable_dask=True)
 
     args = parser.parse_args()
@@ -275,7 +493,8 @@ def main():
                     args.enable_plots, args.plots_dir, args.enable_ssc, args.remove_beads,
                     args.skip_debris, args.skip_time, args.skip_doublets,
                     args.remove_zeros, args.min_cells, args.max_bins,
-                    args.step_val, args.mad_factor, args.enable_dask)
+                    args.step_val, args.mad_factor, args.enable_dask,
+                    args.export_filtered_fcs, args.filtered_output_dir)
 
 if __name__ == '__main__':
     main()
