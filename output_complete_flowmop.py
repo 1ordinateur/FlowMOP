@@ -12,11 +12,47 @@ that preserves all events.
 import argparse
 import logging
 from pathlib import Path
-from typing import Optional
-import numpy as np
-import pandas as pd
-from fcsparser import parse
-import fcswrite
+from typing import Optional, Any, Dict
+import importlib
+
+
+def _ensure_dependencies() -> Dict[str, Any]:
+    """
+    Ensure required third-party dependencies are available. If missing, raise
+    with a one-liner for manual installation.
+    """
+    modules: Dict[str, Any] = {}
+    requirements = [
+        'numpy',
+        'pandas',
+        'fcsparser',
+        'fcswrite',
+    ]
+
+    missing: list[str] = []
+    for module_name in requirements:
+        try:
+            modules[module_name] = importlib.import_module(module_name)
+        except ImportError:
+            missing.append(module_name)
+
+    if missing:
+        install_cmd = "pip install numpy pandas dask fcsparser fcswrite"
+        raise ImportError(
+            "Missing dependencies: "
+            f"{', '.join(missing)}. "
+            f"Please install them (ideally in a virtualenv) with:\n  {install_cmd}"
+        )
+
+    return modules
+
+
+_deps = _ensure_dependencies()
+np = _deps['numpy']
+pd = _deps['pandas']
+fcsparser = _deps['fcsparser']
+fcswrite = _deps['fcswrite']
+parse = fcsparser.parse
 
 
 def _stringify_meta_value(value):

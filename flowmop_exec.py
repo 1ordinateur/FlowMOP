@@ -3,10 +3,50 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 import os
+import importlib
 
-import numpy as np
-import pandas as pd
-import fcsparser
+
+def _ensure_dependencies() -> Dict[str, Any]:
+    """
+    Ensure required third-party dependencies are available. If missing, raise
+    with a one-liner for manual installation.
+    """
+    modules: Dict[str, Any] = {}
+    requirements = [
+        'numpy',
+        'pandas',
+        'fcsparser',
+        'fcswrite',
+        'dask.array',
+        'dask.distributed',
+    ]
+
+    missing: List[str] = []
+    for module_name in requirements:
+        try:
+            modules[module_name] = importlib.import_module(module_name)
+        except ImportError:
+            missing.append(module_name)
+
+    if missing:
+        install_cmd = "pip install numpy pandas dask fcsparser fcswrite"
+        raise ImportError(
+            "Missing dependencies: "
+            f"{', '.join(missing)}. "
+            f"Please install them (ideally in a virtualenv) with:\n  {install_cmd}"
+        )
+
+    return modules
+
+
+_deps = _ensure_dependencies()
+np = _deps['numpy']
+pd = _deps['pandas']
+fcsparser = _deps['fcsparser']
+fcswrite = _deps['fcswrite']
+dask_array = _deps.get('dask.array')
+_ = _deps.get('dask.distributed')
+
 import flowmop_new
 
 
@@ -121,8 +161,6 @@ def write_filtered_fcs_files(
         {'name': 'debrispass', 'columns': ['passed_debris', 'passed_lod']},
         {'name': 'doubletpass', 'columns': ['passed_doublet', 'passed_lod']},
     ]
-
-    import fcswrite
 
     for filter_def in filters_to_apply:
         required_cols = filter_def['columns']
@@ -426,8 +464,6 @@ def process_file(
         # Write to FCS file with metadata preservation
         print(f"Exporting to FCS file: {fcs_output_file}")
         print(f"Preserving {len(complete_metadata)} metadata fields (excluding structural channel defs)")
-        
-        import fcswrite
         # Extract data and channel names from the DataFrame
         output_data = output_df.values
         output_channel_names = output_df.columns.tolist()
