@@ -276,14 +276,9 @@ class FlowMOP:
             fsca_column = self._get_marker_index(marker_names, 'fsca')
         except ValueError:
             warnings.warn("No FSC-A parameter found. Skipping limit of detection removal.")
-            # Conditionally use dask based on enable_dask flag
-            if hasattr(self, 'enable_dask') and self.enable_dask:
-                return fcs_array, da.ones(fcs_array.shape[0], 
-                                        chunks=fcs_array.chunks[0] if isinstance(fcs_array, da.Array) else None,
-                                        dtype=self.int_dtype)
-            else:
-                # Use numpy when dask is disabled
-                return fcs_array, np.ones(fcs_array.shape[0], dtype=self.int_dtype)
+            # When FSC-A is missing, just return a pass-through vector.
+            # Use NumPy here to avoid Dask backend issues when chunks are not explicit.
+            return fcs_array, np.ones(fcs_array.shape[0], dtype=self.int_dtype)
 
         fsca_data = fcs_array[:, fsca_column]
         

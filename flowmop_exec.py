@@ -239,8 +239,24 @@ def load_data(file_path: str) -> Tuple[Dict[str, Any], pd.DataFrame, List[str]]:
 
         # Get channel names from adata.var
         # Prefer marker names if available, fall back to var_names (channel short names)
+        # For scatter parameters (FSC/SSC), always use channel name since they don't have markers
+        def _get_channel_name(marker: str, var_name: str) -> str:
+            """Determine the appropriate channel name."""
+            var_lower = var_name.lower()
+            # Always use channel name for scatter parameters (FSC/SSC)
+            if 'fsc' in var_lower or 'ssc' in var_lower:
+                return var_name
+            # Fall back to var_name if marker is missing or empty
+            if pd.isna(marker) or (isinstance(marker, str) and marker.strip() == ''):
+                return var_name
+            return marker
+
         if 'marker' in adata.var.columns:
-            canonical_channel_names = adata.var['marker'].fillna(adata.var_names).tolist()
+            markers = adata.var['marker']
+            canonical_channel_names = [
+                _get_channel_name(m, v)
+                for m, v in zip(markers, adata.var_names)
+            ]
         else:
             canonical_channel_names = list(adata.var_names)
 
