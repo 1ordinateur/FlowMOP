@@ -2,7 +2,6 @@ import argparse
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
-import os
 import importlib
 
 
@@ -15,7 +14,7 @@ def _ensure_dependencies() -> Dict[str, Any]:
     requirements = [
         'numpy',
         'pandas',
-        'fcsparser',
+        'readfcs',
         'fcswrite',
         'dask.array',
         'dask.distributed',
@@ -29,7 +28,7 @@ def _ensure_dependencies() -> Dict[str, Any]:
             missing.append(module_name)
 
     if missing:
-        install_cmd = "pip install numpy pandas dask fcsparser fcswrite"
+        install_cmd = "pip install numpy pandas dask readfcs fcswrite"
         raise ImportError(
             "Missing dependencies: "
             f"{', '.join(missing)}. "
@@ -42,10 +41,9 @@ def _ensure_dependencies() -> Dict[str, Any]:
 _deps = _ensure_dependencies()
 np = _deps['numpy']
 pd = _deps['pandas']
-fcsparser = _deps['fcsparser']
+readfcs = _deps['readfcs']
 fcswrite = _deps['fcswrite']
-dask_array = _deps.get('dask.array')
-_ = _deps.get('dask.distributed')
+# Dask modules are validated by _ensure_dependencies but used internally by flowmop_new
 
 import flowmop_new
 
@@ -59,83 +57,90 @@ def _stringify_meta_value(value: Any) -> str:
 
 def _clean_metadata(
     meta_raw: Dict[str, Any],
-    drop_parameter_keywords: bool = True,
     set_total_events: Optional[int] = None,
 ) -> Dict[str, str]:
     """
-    Build a metadata dict for output, preserving original keys except those that
-    are structural or internal. Structural channel definitions can be dropped
-    to let fcswrite regenerate them based on the provided data.
+    Build a metadata dict for output, preserving all original metadata except
+    structural byte offsets (fcswrite recalculates) and $PAR (changes when
+    columns are added).
+
+    Handles both fcsparser-style keys ($KEY) and readfcs-style keys (lowercase, no $).
+    Standard FCS keywords get $KEY format; user-defined keys are uppercased without $.
+    Original parameter metadata ($PnG, $PnV, etc.) is preserved for original channels.
+
+    Args:
+        meta_raw: Raw metadata dictionary from readfcs or fcsparser
+        set_total_events: If provided, override $TOT (use for filtered outputs only)
+
+    Returns:
+        Cleaned metadata dict ready for fcswrite
     """
+    # FCS 3.0/3.1 standard keywords that should have $ prefix (lowercase, without $)
+    fcs_standard_keywords = {
+        # Required keywords
+        'byteord', 'datatype', 'mode', 'tot',
+        # Optional keywords
+        'abrt', 'btim', 'cells', 'com', 'comp', 'csmode', 'csvbits',
+        'cyt', 'cytsn', 'date', 'etim', 'exp', 'fil',
+        'gate', 'gating', 'inst', 'lost', 'op',
+        'proj', 'smno', 'src', 'sys', 'timestep', 'tr', 'unicode',
+        # Spillover/compensation
+        'spill', 'spillover',
+    }
+
+    # Structural byte offsets - must be stripped (fcswrite recalculates these)
     structural_to_strip = {
-        '$BEGINDATA',
-        '$ENDDATA',
-        '$BEGINTEXT',
-        '$ENDTEXT',
-        '$BEGINANALYSIS',
-        '$ENDANALYSIS',
-        '$NEXTDATA',
+        'begindata', 'enddata', 'begintext', 'endtext',
+        'beginanalysis', 'endanalysis', 'beginstext', 'endstext', 'nextdata',
     }
 
     cleaned: Dict[str, str] = {}
     for key, value in meta_raw.items():
-        if key is None:
+        if key is None or value is None:
             continue
+
         key_str = str(key)
-        key_upper = key_str.upper()
+        key_normalized = key_str.lower().lstrip('$')
 
         # Skip internal/helper keys
         if key_str.startswith('_'):
             continue
 
-        # Skip low-level structural offsets
-        if key_upper in structural_to_strip:
+        # Skip structural byte offsets (fcswrite recalculates)
+        if key_normalized in structural_to_strip:
             continue
 
-        # Skip parameter definitions when we let fcswrite rebuild them
-        if drop_parameter_keywords and (key_upper.startswith('$P') or key_upper == '$PAR'):
+        # Skip $PAR (parameter count changes when we add columns)
+        if key_normalized == 'par':
             continue
 
-        if value is None:
-            continue
+        # Determine output key format
+        if key_normalized in fcs_standard_keywords:
+            # Standard FCS keyword -> $KEY format
+            output_key = f'${key_normalized.upper()}'
+        elif len(key_normalized) > 1 and key_normalized[0] in ('p', 'g', 'r') and key_normalized[1].isdigit():
+            # Parameter/gating/region keyword like p1n, g1n, r1i -> $P1N format
+            output_key = f'${key_normalized.upper()}'
+        elif key_normalized.startswith('csv') and 'flag' in key_normalized:
+            # Cell subset flag like csv1flag -> $CSV1FLAG
+            output_key = f'${key_normalized.upper()}'
+        elif key_normalized.startswith('pk') and len(key_normalized) > 2 and key_normalized[2].isdigit():
+            # Peak keywords like pkn1, pk1 -> $PKN1
+            output_key = f'${key_normalized.upper()}'
+        elif key_str.startswith('$'):
+            # Already has $ prefix, just uppercase
+            output_key = key_str.upper()
+        else:
+            # User-defined keyword, uppercase without $
+            output_key = key_str.upper()
 
-        cleaned[key_str] = _stringify_meta_value(value)
+        cleaned[output_key] = _stringify_meta_value(value)
 
+    # Override $TOT only if explicitly requested (for filtered outputs)
     if set_total_events is not None:
         cleaned['$TOT'] = str(set_total_events)
 
     return cleaned
-
-
-def _derive_canonical_channel_names(
-    meta_raw: Dict[str, Any],
-    fallback_columns: List[str],
-) -> List[str]:
-    """
-    Recover canonical channel order from $PnN/$PnS keys. Falls back to the
-    provided columns if metadata is incomplete.
-    """
-    meta_lower = {str(k).lower(): v for k, v in meta_raw.items()}
-    par_count = meta_lower.get('$par')
-    try:
-        par_count = int(par_count)
-    except (TypeError, ValueError):
-        par_count = len(fallback_columns)
-
-    names: List[str] = []
-    for i in range(1, par_count + 1):
-        name = meta_lower.get(f'$p{i}n')
-        if name is None:
-            name = meta_lower.get(f'$p{i}s')
-
-        if name is None and i - 1 < len(fallback_columns):
-            name = fallback_columns[i - 1]
-        if name is None:
-            name = f'P{i}'
-
-        names.append(str(name))
-
-    return names
 
 
 def _ensure_numpy(vector: Any) -> np.ndarray:
@@ -186,7 +191,6 @@ def write_filtered_fcs_files(
 
         filtered_meta = _clean_metadata(
             meta_raw=meta_raw,
-            drop_parameter_keywords=True,
             set_total_events=len(filtered_df),
         )
         filtered_meta['flowmop_filtered'] = 'true'
@@ -224,27 +228,26 @@ def load_data(file_path: str) -> Tuple[Dict[str, Any], pd.DataFrame, List[str]]:
     
     if file_path.suffix.lower() == '.fcs':
         print(f"Loading FCS file: {file_path}")
-        # Raw metadata and data (unreformatted)
-        meta_raw, data = fcsparser.parse(file_path, reformat_meta=False)
+        # Read FCS file using readfcs
+        adata = readfcs.read(str(file_path))
 
-        # Ensure we have a DataFrame for processing
-        if isinstance(data, pd.DataFrame):
-            data_df = data.copy()
+        # Extract data as DataFrame
+        data_df = adata.to_df()
+
+        # Get metadata (readfcs uses lowercase keys without $)
+        meta_raw = adata.uns.get("meta", {})
+
+        # Get channel names from adata.var
+        # Prefer marker names if available, fall back to var_names (channel short names)
+        if 'marker' in adata.var.columns:
+            canonical_channel_names = adata.var['marker'].fillna(adata.var_names).tolist()
         else:
-            data_df = pd.DataFrame(data)
+            canonical_channel_names = list(adata.var_names)
 
-        # Recover canonical channel names from metadata
-        canonical_channel_names = _derive_canonical_channel_names(
-            meta_raw,
-            list(data_df.columns),
-        )
-
-        # Align DataFrame columns to canonical names if lengths match
+        # Ensure column names match canonical names
         if len(canonical_channel_names) == len(data_df.columns):
             data_df = data_df.copy()
             data_df.columns = canonical_channel_names
-        else:
-            canonical_channel_names = list(data_df.columns)
 
         print(
             f"Extracted {len(meta_raw)} metadata fields "
@@ -434,12 +437,8 @@ def process_file(
                 continue
             output_df[col_name] = vector.astype(int)
         
-        # Prepare metadata: start from raw, strip structural parameter defs, keep other keys
-        complete_metadata = _clean_metadata(
-            meta_raw=meta_raw,
-            drop_parameter_keywords=True,
-            set_total_events=len(output_df),
-        )
+        # Prepare metadata: preserve all original metadata, only strip structural offsets and $PAR
+        complete_metadata = _clean_metadata(meta_raw=meta_raw)
 
         # Add FlowMOP processing metadata
         complete_metadata['flowmop_output_filename'] = str(fcs_output_file)
