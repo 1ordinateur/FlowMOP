@@ -254,8 +254,9 @@ if [[ $REMOVE_ZEROS -eq 0 ]]; then
     CMD_OPTIONS="$CMD_OPTIONS --disable-remove-zeros"
 fi
 
-# Hardcode the path to flowmop_exec.py
-FLOWMOP_SCRIPT="/g/data/eu59/FlowMOP/src/flowmop_exec.py"
+# Get path to flowmop_exec.py relative to this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FLOWMOP_SCRIPT="$SCRIPT_DIR/flowmop_exec.py"
 
 # Print processing information
 echo "Parallel processing ${#FILES[@]} files with max $MAX_PARALLEL simultaneous jobs"

@@ -14,9 +14,9 @@ ArrayType = Union[np.ndarray, da.Array]
 DEFAULT_ARRAY_MODULE = np
 
 # Import CPU implementations
-from cpu.time_gating import TimeGateStrategy, MADTimeGate
-from cpu.debris_gating import DebrisGateStrategy, FSCDebrisGate
-from cpu.doublet_gating import DoubletGateStrategy, MADDoubletGate, InflectionDoubletGate
+from functions.time_gating import TimeGateStrategy, MADTimeGate
+from functions.debris_gating import DebrisGateStrategy, FSCDebrisGate
+from functions.doublet_gating import DoubletGateStrategy, MADDoubletGate, InflectionDoubletGate
 
 class FlowMOP:
     """Main class for the Flow Cytometry Multi-Operation Pipeline."""

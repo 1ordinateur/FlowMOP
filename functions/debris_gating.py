@@ -12,7 +12,7 @@ import warnings
 from typing import List, Tuple, Optional, NamedTuple
 from dataclasses import dataclass
 import matplotlib.pyplot as plt
-from cpu.flowmop_utils import Peak, process_histogram, standardize_marker_name, is_excluded_marker, find_left_minimum
+from functions.flowmop_utils import Peak, process_histogram, standardize_marker_name, is_excluded_marker, find_left_minimum
 
 @dataclass
 class DebrisGateResult:

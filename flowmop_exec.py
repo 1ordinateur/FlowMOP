@@ -45,8 +45,7 @@ readfcs = _deps['readfcs']
 fcswrite = _deps['fcswrite']
 # Dask modules are validated by _ensure_dependencies but used internally by flowmop_new
 
-import flowmop_new
-
+from base import flowmop_new
 
 def _stringify_meta_value(value: Any) -> str:
     """Convert metadata values to strings for FCS writing."""

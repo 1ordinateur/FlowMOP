@@ -10,8 +10,8 @@ import numpy.ma as ma
 from scipy.ndimage import maximum_filter1d
 from scipy.interpolate import UnivariateSpline
 from abc import ABC, abstractmethod
-from cpu.flowmop_utils import process_histogram, Peak  # Changed to relative import
-from cpu.flowmop_utils import normalize_timeseries_values, apply_spline_smoothing, calculate_mad_thresholds
+from functions.flowmop_utils import process_histogram, Peak  # Changed to relative import
+from functions.flowmop_utils import normalize_timeseries_values, apply_spline_smoothing, calculate_mad_thresholds
 import matplotlib.pyplot as plt
 import logging
 from pathlib import Path
