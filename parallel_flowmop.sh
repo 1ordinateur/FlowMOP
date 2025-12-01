@@ -1,12 +1,19 @@
 #!/bin/bash
-# parallel_flowmop.sh - Simple parallel execution script for FlowMOP
-# 
+# parallel_flowmop.sh - Parallel execution script for FlowMOP
+#
 # This script processes multiple FCS/parquet files in parallel using GNU Parallel
 #
 # Usage:
 #   ./parallel_flowmop.sh --input-dir /path/to/input --output-dir /path/to/output [OPTIONS]
+#
+# Environment variables:
+#   FLOWMOP_SCRIPT  Path to flowmop_exec.py (default: auto-detected relative to this script)
 
 set -e
+
+# Determine script directory and flowmop_exec.py location
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FLOWMOP_SCRIPT="${FLOWMOP_SCRIPT:-$SCRIPT_DIR/flowmop_exec.py}"
 
 # Function to remove spaces from filenames
 remove_spaces() {
@@ -38,8 +45,13 @@ REMOVE_ZEROS=1
 MIN_CELLS=1000
 MAX_BINS=600
 STEP_VAL=200
-MAD_FACTOR=5
+MAD_FACTOR=4
 SKIP_PROCESSED=1
+DISABLE_DASK=0
+EXPORT_FILTERED=0
+FILTERED_OUTPUT_DIR=""
+DRY_RUN=0
+VERBOSE=0
 
 # Check if parallel is installed
 if ! command -v parallel &> /dev/null; then
@@ -126,32 +138,78 @@ while [[ $# -gt 0 ]]; do
             SKIP_PROCESSED=0
             shift
             ;;
+        --disable-dask)
+            DISABLE_DASK=1
+            shift
+            ;;
+        --export-filtered-fcs)
+            EXPORT_FILTERED=1
+            shift
+            ;;
+        --filtered-output-dir)
+            FILTERED_OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --verbose)
+            VERBOSE=1
+            shift
+            ;;
         --help)
             echo "Usage: $0 --input-dir <dir> --output-dir <dir> [OPTIONS]"
             echo ""
-            echo "Required arguments:"
-            echo "  --input-dir <dir>         Directory containing input files"
-            echo "  --output-dir <dir>        Directory to save output files"
+            echo "Process multiple FCS/parquet files in parallel using FlowMOP."
             echo ""
-            echo "Optional arguments:"
-            echo "  --file-pattern <pattern>  Glob pattern to match files (default: *.fcs)"
-            echo "  --max-parallel <num>      Maximum number of parallel processes (default: 4)"
-            echo "  --fluor-mode <mode>       Mode for fluorescence analysis (default: positive_geomeans)"
-            echo "                            Options: positives, geomean, positive_geomeans, both"
-            echo "  --mad-smoothing <values>  Smoothing factors for MAD-based time gating (default: '0.1 0.9')"
-            echo "  --enable-plots            Generate time gate plots"
-            echo "  --plots-dir <dir>         Directory to save time gate plots (default: time_gate_plots)"
-            echo "  --enable-ssc              Use SSC-A for debris gating in addition to FSC-A"
-            echo "  --remove-beads            Detect and remove beads based on SSC/FSC characteristics"
-            echo "  --skip-debris             Skip debris filtering"
-            echo "  --skip-time               Skip time filtering"
-            echo "  --skip-doublets           Skip doublet filtering"
-            echo "  --disable-remove-zeros    Disable removal of zero values (zeros are removed by default)"
-            echo "  --min-cells <num>         Minimum number of cells required (default: 1000)"
-            echo "  --max-bins <num>          Maximum number of bins (default: 600)"
-            echo "  --step-val <num>          Step size for binning (default: 200)"
-            echo "  --mad-factor <num>        Factor for MAD calculation (default: 3)"
-            echo "  --no-skip-processed       Process all files, even if already processed"
+            echo "Required arguments:"
+            echo "  --input-dir <dir>           Directory containing input files"
+            echo "  --output-dir <dir>          Directory to save output files"
+            echo ""
+            echo "Parallel processing:"
+            echo "  --max-parallel <num>        Maximum parallel processes (default: 4)"
+            echo "  --file-pattern <pattern>    Glob pattern to match files (default: *.fcs)"
+            echo "  --no-skip-processed         Process all files, even if already processed"
+            echo "  --dry-run                   List files that would be processed without running"
+            echo "  --verbose                   Show detailed output"
+            echo ""
+            echo "Gating options:"
+            echo "  --fluor-mode <mode>         Mode for fluorescence analysis (default: positive_geomeans)"
+            echo "                              Options: positives, geomean, positive_geomeans, both"
+            echo "  --mad-smoothing <values>    Smoothing factors for MAD-based time gating (default: '0.1 0.9')"
+            echo "  --min-cells <num>           Minimum cells required per bin (default: 1000)"
+            echo "  --max-bins <num>            Maximum number of bins (default: 600)"
+            echo "  --step-val <num>            Step size for binning (default: 200)"
+            echo "  --mad-factor <num>          Factor for MAD calculation (default: 4)"
+            echo ""
+            echo "Gate skipping:"
+            echo "  --skip-debris               Skip debris filtering"
+            echo "  --skip-time                 Skip time filtering"
+            echo "  --skip-doublets             Skip doublet filtering"
+            echo "  --disable-remove-zeros      Disable removal of zero values"
+            echo ""
+            echo "Additional features:"
+            echo "  --enable-plots              Generate time gate plots"
+            echo "  --plots-dir <dir>           Directory for time gate plots (default: time_gate_plots)"
+            echo "  --enable-ssc                Use SSC-A for debris gating in addition to FSC-A"
+            echo "  --remove-beads              Detect and remove beads based on SSC/FSC"
+            echo "  --disable-dask              Disable Dask parallel processing"
+            echo "  --export-filtered-fcs       Export filtered FCS subsets (passfiltered, timepass, etc.)"
+            echo "  --filtered-output-dir <dir> Directory for filtered FCS output (default: output-dir)"
+            echo ""
+            echo "Environment variables:"
+            echo "  FLOWMOP_SCRIPT              Path to flowmop_exec.py (default: auto-detected)"
+            echo ""
+            echo "Examples:"
+            echo "  # Basic usage"
+            echo "  $0 --input-dir ./data --output-dir ./output"
+            echo ""
+            echo "  # Process with 8 parallel jobs and export filtered files"
+            echo "  $0 --input-dir ./data --output-dir ./output --max-parallel 8 --export-filtered-fcs"
+            echo ""
+            echo "  # Dry run to see what files would be processed"
+            echo "  $0 --input-dir ./data --output-dir ./output --dry-run"
             exit 0
             ;;
         *)
@@ -253,19 +311,67 @@ fi
 if [[ $REMOVE_ZEROS -eq 0 ]]; then
     CMD_OPTIONS="$CMD_OPTIONS --disable-remove-zeros"
 fi
+if [[ $DISABLE_DASK -eq 1 ]]; then
+    CMD_OPTIONS="$CMD_OPTIONS --disable-dask"
+fi
+if [[ $EXPORT_FILTERED -eq 1 ]]; then
+    CMD_OPTIONS="$CMD_OPTIONS --export-filtered-fcs"
+fi
+if [[ -n "$FILTERED_OUTPUT_DIR" ]]; then
+    CMD_OPTIONS="$CMD_OPTIONS --filtered-output-dir $FILTERED_OUTPUT_DIR"
+fi
 
-# Get path to flowmop_exec.py relative to this script
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FLOWMOP_SCRIPT="$SCRIPT_DIR/flowmop_exec.py"
+# Verify flowmop_exec.py exists
+if [[ ! -f "$FLOWMOP_SCRIPT" ]]; then
+    echo "Error: Cannot find flowmop_exec.py at: $FLOWMOP_SCRIPT"
+    echo "Set FLOWMOP_SCRIPT environment variable to override."
+    exit 1
+fi
+
+# Verbose output
+if [[ $VERBOSE -eq 1 ]]; then
+    echo "Configuration:"
+    echo "  Input directory:  $INPUT_DIR"
+    echo "  Output directory: $OUTPUT_DIR"
+    echo "  FlowMOP script:   $FLOWMOP_SCRIPT"
+    echo "  Max parallel:     $MAX_PARALLEL"
+    echo "  Fluor mode:       $FLUOR_MODE"
+    echo "  MAD smoothing:    $MAD_SMOOTHING"
+    echo "  MAD factor:       $MAD_FACTOR"
+    echo "  Min cells:        $MIN_CELLS"
+    echo "  Max bins:         $MAX_BINS"
+    echo "  Step value:       $STEP_VAL"
+    echo ""
+fi
 
 # Print processing information
-echo "Parallel processing ${#FILES[@]} files with max $MAX_PARALLEL simultaneous jobs"
+echo "Found ${#FILES[@]} files to process with max $MAX_PARALLEL parallel jobs"
+if [[ $VERBOSE -eq 1 ]]; then
+    echo "Files to process:"
+    for f in "${FILES[@]}"; do
+        echo "  $f"
+    done
+    echo ""
+fi
+
+# Dry run mode - just list files and exit
+if [[ $DRY_RUN -eq 1 ]]; then
+    echo "[DRY RUN] Would process the following files:"
+    for f in "${FILES[@]}"; do
+        echo "  $f"
+    done
+    echo ""
+    echo "[DRY RUN] Command that would be executed:"
+    echo "  python3 -u $FLOWMOP_SCRIPT <file> $CMD_OPTIONS"
+    exit 0
+fi
+
 echo "Output will be saved to $OUTPUT_DIR"
 
 # Run processes in parallel using GNU Parallel
-# Use python3 explicitly
 parallel --bar --jobs $MAX_PARALLEL --halt never python3 -u "$FLOWMOP_SCRIPT" {} $CMD_OPTIONS ::: "${FILES[@]}"
 
+echo ""
 echo "Processing complete!"
 echo "Processed ${#FILES[@]} files"
 echo "Output saved to $OUTPUT_DIR"
