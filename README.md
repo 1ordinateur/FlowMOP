@@ -2,6 +2,18 @@
 
 A command-line tool for automated quality control of flow cytometry data. FlowMOP processes FCS and Parquet files through a gating pipeline that removes debris, doublets, and time-based anomalies.
 
+## Table of Contents
+
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Batch Processing](#batch-processing)
+- [Usage](#usage)
+- [CLI Arguments](#cli-arguments)
+- [Output Files](#output-files)
+- [Architecture](#architecture)
+- [Notes](#notes)
+- [Related Scripts](#related-scripts)
+
 ## Installation
 
 ### Dependencies
@@ -34,6 +46,43 @@ python flowmop_exec.py sample.fcs --output-dir ./output
 ```
 
 For batch processing of multiple files, see [Batch Processing](#batch-processing) below.
+
+## Batch Processing
+
+For processing multiple files in parallel, use `run_flowmop_directory.sh`:
+
+```bash
+./run_flowmop_directory.sh --input-dir ./fcs_files --output-dir ./output
+```
+
+### Batch Processing Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--input-dir` | required | Directory containing input FCS/Parquet files |
+| `--output-dir` | required | Directory for output files |
+| `--file-pattern` | `*.fcs` | Glob pattern to match files |
+| `--max-parallel` | `4` | Number of parallel workers |
+| `--no-skip-processed` | false | Reprocess files that already have output |
+| `--dry-run` | false | List files that would be processed without running |
+| `--verbose` | false | Show detailed output |
+
+All FlowMOP options (`--fluor-mode`, `--mad-smoothing`, etc.) are passed through to `flowmop_exec.py`.
+
+### Example
+
+```bash
+./run_flowmop_directory.sh \
+    --input-dir ./data \
+    --output-dir ./output \
+    --max-parallel 8 \
+    --fluor-mode positive_geomeans \
+    --mad-factor 5
+```
+
+### Requirements
+
+- **GNU Parallel** must be installed (`apt install parallel` or `brew install parallel`)
 
 ## Usage
 
@@ -152,13 +201,16 @@ When `--export-filtered-fcs` is enabled, additional FCS files containing only ev
 
 ```
 src/
-├── flowmop_exec.py    # CLI entry point
-├── flowmop_new.py     # FlowMOP class (main pipeline)
-└── cpu/
-    ├── time_gating.py     # Time-based anomaly detection
-    ├── debris_gating.py   # Debris removal (FSC-based)
-    ├── doublet_gating.py  # Doublet detection
-    └── flowmop_utils.py   # Utility functions
+├── flowmop_exec.py              # CLI entry point
+├── run_flowmop_directory.sh     # Batch processing script
+├── base/
+│   ├── flowmop_new.py           # FlowMOP class (main pipeline)
+│   └── output_complete_flowmop.py
+└── functions/
+    ├── time_gating.py           # Time-based anomaly detection
+    ├── debris_gating.py         # Debris removal (FSC-based)
+    ├── doublet_gating.py        # Doublet detection
+    └── flowmop_utils.py         # Utility functions
 ```
 
 ### Key Functions
@@ -193,9 +245,11 @@ Cleans and standardizes metadata for FCS output:
 
 ### FlowMOP Class Integration
 
-`flowmop_exec.py` uses the `FlowMOP` class from `flowmop_new.py`:
+`flowmop_exec.py` uses the `FlowMOP` class from `base/flowmop_new.py`:
 
 ```python
+from base import flowmop_new
+
 flowmop = flowmop_new.FlowMOP(
     time_channel_index=time_channel_index,
     remove_zeros=remove_zeros,
@@ -226,44 +280,9 @@ By default, FlowMOP uses Dask for parallel processing. Disable with `--disable-d
 
 For FCS files, FlowMOP uses marker names when available, falling back to channel short names. Scatter parameters (FSC/SSC) always use the channel name since they typically don't have marker assignments.
 
-## Batch Processing
-
-For processing multiple files in parallel, use `parallel_flowmop.sh`:
-
-```bash
-./parallel_flowmop.sh --input-dir ./fcs_files --output-dir ./output
-```
-
-### Batch Processing Arguments
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--input-dir` | required | Directory containing input FCS/Parquet files |
-| `--output-dir` | required | Directory for output files |
-| `--file-pattern` | `*.fcs` | Glob pattern to match files |
-| `--max-parallel` | `4` | Number of parallel workers |
-| `--no-skip-processed` | false | Reprocess files that already have output |
-
-All FlowMOP options (`--fluor-mode`, `--mad-smoothing`, etc.) are passed through to `flowmop_exec.py`.
-
-### Example
-
-```bash
-./parallel_flowmop.sh \
-    --input-dir ./data \
-    --output-dir ./output \
-    --max-parallel 8 \
-    --fluor-mode positive_geomeans \
-    --mad-factor 5
-```
-
-### Requirements
-
-- **GNU Parallel** must be installed (`apt install parallel` or `brew install parallel`)
-
 ## Related Scripts
 
-### output_complete_flowmop.py
+### base/output_complete_flowmop.py
 
 This script is largely redundant with `flowmop_exec.py --export-filtered-fcs`:
 

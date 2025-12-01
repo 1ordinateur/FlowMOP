@@ -227,42 +227,51 @@ def load_data(file_path: str) -> Tuple[Dict[str, Any], pd.DataFrame, List[str]]:
     
     if file_path.suffix.lower() == '.fcs':
         print(f"Loading FCS file: {file_path}")
-        # Read FCS file using readfcs
-        adata = readfcs.read(str(file_path))
 
-        # Extract data as DataFrame
-        data_df = adata.to_df()
+        try:
+            # Read FCS file using readfcs
+            adata = readfcs.read(str(file_path))
 
-        # Get metadata (readfcs uses lowercase keys without $)
-        meta_raw = adata.uns.get("meta", {})
+            # Extract data as DataFrame
+            data_df = adata.to_df()
 
-        # Get channel names from adata.var
-        # Prefer marker names if available, fall back to var_names (channel short names)
-        # For scatter parameters (FSC/SSC), always use channel name since they don't have markers
-        def _get_channel_name(marker: str, var_name: str) -> str:
-            """Determine the appropriate channel name."""
-            var_lower = var_name.lower()
-            # Always use channel name for scatter parameters (FSC/SSC)
-            if 'fsc' in var_lower or 'ssc' in var_lower:
-                return var_name
-            # Fall back to var_name if marker is missing or empty
-            if pd.isna(marker) or (isinstance(marker, str) and marker.strip() == ''):
-                return var_name
-            return marker
+            # Get metadata (readfcs uses lowercase keys without $)
+            meta_raw = adata.uns.get("meta", {})
 
-        if 'marker' in adata.var.columns:
-            markers = adata.var['marker']
-            canonical_channel_names = [
-                _get_channel_name(m, v)
-                for m, v in zip(markers, adata.var_names)
-            ]
-        else:
-            canonical_channel_names = list(adata.var_names)
+            # Get channel names from adata.var
+            # Prefer marker names if available, fall back to var_names (channel short names)
+            # For scatter parameters (FSC/SSC), always use channel name since they don't have markers
+            def _get_channel_name(marker: str, var_name: str) -> str:
+                """Determine the appropriate channel name."""
+                var_lower = var_name.lower()
+                # Always use channel name for scatter parameters (FSC/SSC)
+                if 'fsc' in var_lower or 'ssc' in var_lower:
+                    return var_name
+                # Fall back to var_name if marker is missing or empty
+                if pd.isna(marker) or (isinstance(marker, str) and marker.strip() == ''):
+                    return var_name
+                return marker
 
-        # Ensure column names match canonical names
-        if len(canonical_channel_names) == len(data_df.columns):
-            data_df = data_df.copy()
-            data_df.columns = canonical_channel_names
+            if 'marker' in adata.var.columns:
+                markers = adata.var['marker']
+                canonical_channel_names = [
+                    _get_channel_name(m, v)
+                    for m, v in zip(markers, adata.var_names)
+                ]
+            else:
+                canonical_channel_names = list(adata.var_names)
+
+            # Ensure column names match canonical names
+            if len(canonical_channel_names) == len(data_df.columns):
+                data_df = data_df.copy()
+                data_df.columns = canonical_channel_names
+
+        except Exception as e:
+            # Fallback: Lazy import fcsparser only when needed
+            import fcsparser
+            print(f"readfcs failed ({e}), falling back to fcsparser...")
+            meta_raw, data_df = fcsparser.parse(str(file_path), reformat_meta=True)
+            canonical_channel_names = list(data_df.columns)
 
         print(
             f"Extracted {len(meta_raw)} metadata fields "
