@@ -95,6 +95,17 @@ def test_time_preprocessing_preserves_event_count_when_clipping_saturation(monke
     assert len(processed) == len(channel)
 
 
+def test_spline_smoothing_passthrough_for_tiny_series():
+    flowmop_utils = importlib.import_module("functions.flowmop_utils")
+
+    values = np.array([0.25, 0.5, 0.75])
+
+    np.testing.assert_array_equal(
+        flowmop_utils.apply_spline_smoothing(values, smoothing_factor=0.1, n_bins=len(values)),
+        values,
+    )
+
+
 def test_vectorized_positive_geomeans_match_loop_aggregation(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
     time_gating = importlib.import_module("functions.time_gating")
