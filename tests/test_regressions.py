@@ -186,6 +186,138 @@ def test_removed_bins_deduplicates_overlapping_windows(monkeypatch):
     np.testing.assert_array_equal(removed["cells"], np.array([False, False, False, False, False, True]))
 
 
+def test_channel_summary_mad_helper_accumulates_rejections(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    time_gating = importlib.import_module("functions.time_gating")
+
+    gate = time_gating.MADTimeGate(enable_dask=False)
+    summaries = {
+        1: np.array([(0, 10.0)], dtype=[("Bin", int), ("Threshold", float)]),
+        2: np.array([(1, 20.0)], dtype=[("Bin", int), ("Threshold", float)]),
+    }
+    calls = []
+
+    def fake_mad(summary_values, breaks, nr_cells, use_dask=None):
+        calls.append((gate.current_marker, summary_values.copy(), use_dask))
+        rejected = np.zeros(nr_cells, dtype=bool)
+        rejected[len(calls) - 1] = True
+        return rejected
+
+    monkeypatch.setattr(gate, "_apply_mad_analysis", fake_mad)
+
+    rejection_count = gate._apply_channel_summary_mad(
+        summaries,
+        [np.array([0]), np.array([1])],
+        3,
+        np.zeros(3, dtype=int),
+        channel_to_marker={1: "CD3", 2: "CD19"},
+        marker_suffix="_PositiveGeomean",
+        use_dask=True,
+    )
+
+    np.testing.assert_array_equal(rejection_count, np.array([1, 1, 0]))
+    assert [call[0] for call in calls] == ["CD3_PositiveGeomean", "CD19_PositiveGeomean"]
+    assert [call[2] for call in calls] == [True, True]
+
+
+def test_positive_peaks_wrapper_forwards_markers_and_dask(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    time_gating = importlib.import_module("functions.time_gating")
+
+    gate = time_gating.MADTimeGate(enable_dask=True)
+    thresholds = {
+        1: np.array([(0, 10.0)], dtype=[("Bin", int), ("Threshold", float)]),
+        2: np.array([(0, 20.0)], dtype=[("Bin", int), ("Threshold", float)]),
+    }
+    calls = []
+
+    monkeypatch.setattr(
+        gate,
+        "_determine_thresholds_all_channels",
+        lambda _data, _channels, _breaks, _markers: thresholds,
+    )
+
+    def fake_mad(summary_values, breaks, nr_cells, use_dask=None):
+        calls.append((gate.current_marker, summary_values.copy(), use_dask))
+        rejected = np.zeros(nr_cells, dtype=bool)
+        rejected[len(calls) - 1] = True
+        return rejected
+
+    monkeypatch.setattr(gate, "_apply_mad_analysis", fake_mad)
+
+    rejection_count = gate._process_positive_peaks(
+        np.ones((4, 3), dtype=float),
+        [1, 2],
+        [np.array([0, 1]), np.array([2, 3])],
+        ["Time", "CD3", "CD19"],
+        np.zeros(4, dtype=int),
+    )
+
+    np.testing.assert_array_equal(rejection_count, np.array([1, 1, 0, 0]))
+    assert [call[0] for call in calls] == ["CD3", "CD19"]
+    assert [call[2] for call in calls] == [True, True]
+
+
+def test_geomean_wrapper_forwards_dask(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    time_gating = importlib.import_module("functions.time_gating")
+
+    gate = time_gating.MADTimeGate(enable_dask=True)
+    geomean_values = np.array([(0, 10.0)], dtype=[("Bin", int), ("Threshold", float)])
+    calls = []
+
+    monkeypatch.setattr(
+        gate,
+        "_geomean_mad_check",
+        lambda _data, _channels, _breaks: geomean_values,
+    )
+
+    def fake_mad(summary_values, breaks, nr_cells, use_dask=None):
+        calls.append((summary_values.copy(), use_dask))
+        rejected = np.zeros(nr_cells, dtype=bool)
+        rejected[0] = True
+        return rejected
+
+    monkeypatch.setattr(gate, "_apply_mad_analysis", fake_mad)
+
+    rejection_count = gate._process_geometric_mean(
+        np.ones((3, 3), dtype=float),
+        [1, 2],
+        [np.array([0, 1]), np.array([2])],
+        np.zeros(3, dtype=int),
+    )
+
+    np.testing.assert_array_equal(rejection_count, np.array([1, 0, 0]))
+    assert len(calls) == 1
+    assert calls[0][1] is True
+
+
+def test_both_mode_requires_two_rejection_contributions(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    time_gating = importlib.import_module("functions.time_gating")
+
+    gate = time_gating.MADTimeGate(enable_dask=False, fluor_mode="both")
+
+    def fake_positive_peaks(_data, _channels, _breaks, _markers, rejection_count):
+        rejection_count[np.array([0, 1])] += 1
+        return rejection_count
+
+    def fake_geomean(_data, _channels, _breaks, rejection_count):
+        rejection_count[np.array([1, 2])] += 1
+        return rejection_count
+
+    monkeypatch.setattr(gate, "_process_positive_peaks", fake_positive_peaks)
+    monkeypatch.setattr(gate, "_process_geometric_mean", fake_geomean)
+
+    _, time_gate_vector = gate.gate(
+        np.ones((4, 3), dtype=float),
+        0,
+        ["Time", "CD3", "CD19"],
+    )
+
+    np.testing.assert_array_equal(time_gate_vector, np.array([True, False, True, True]))
+
+
 def test_positive_geomean_path_matches_loop_integration(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
     time_gating = importlib.import_module("functions.time_gating")
