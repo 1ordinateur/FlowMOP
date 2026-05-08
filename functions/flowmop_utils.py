@@ -254,7 +254,7 @@ def apply_spline_smoothing(values: np.ndarray, smoothing_factor: float, n_bins: 
     if n_bins is None:
         n_bins = len(values)
 
-    if len(values) <= 3:
+    if len(values) <= 3 or smoothing_factor <= 0:
         return np.asarray(values)
     
     # Scale smoothing factor based on number of bins

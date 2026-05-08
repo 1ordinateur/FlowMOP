@@ -106,6 +106,17 @@ def test_spline_smoothing_passthrough_for_tiny_series():
     )
 
 
+def test_spline_smoothing_zero_factor_disables_smoothing():
+    flowmop_utils = importlib.import_module("functions.flowmop_utils")
+
+    values = np.array([0.25, 0.5, 0.75, 0.5, 0.25])
+
+    np.testing.assert_array_equal(
+        flowmop_utils.apply_spline_smoothing(values, smoothing_factor=0.0, n_bins=len(values)),
+        values,
+    )
+
+
 def test_vectorized_positive_geomeans_match_loop_aggregation(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
     time_gating = importlib.import_module("functions.time_gating")
