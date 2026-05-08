@@ -69,8 +69,26 @@ def _load_dependencies() -> None:
 def _stringify_meta_value(value: Any) -> str:
     """Convert metadata values to strings for FCS writing."""
     if isinstance(value, (list, tuple)):
-        return ','.join(str(v) for v in value)
-    return str(value)
+        value = ','.join(str(v) for v in value)
+    return str(value).replace('/', '|').replace('\r', ' ').replace('\n', ' ')
+
+
+def _prepare_fcs_text_metadata(metadata: Dict[str, Any]) -> Dict[str, str]:
+    """Sanitize metadata for fcswrite's slash-delimited TEXT segment."""
+    return {
+        str(key).replace('/', '|').replace('\r', ' ').replace('\n', ' '): (
+            _stringify_meta_value(value)
+        )
+        for key, value in metadata.items()
+    }
+
+
+def _ensure_marker_keywords(metadata: Dict[str, Any], channel_names: List[str]) -> Dict[str, Any]:
+    """Ensure $PnS marker keywords exist for readers that require them."""
+    metadata = metadata.copy()
+    for index, channel_name in enumerate(channel_names, start=1):
+        metadata.setdefault(f'$P{index}S', channel_name)
+    return metadata
 
 
 def _clean_metadata(
@@ -88,7 +106,8 @@ def _clean_metadata(
 
     Args:
         meta_raw: Raw metadata dictionary from readfcs or fcsparser
-        set_total_events: If provided, override $TOT (use for filtered outputs only)
+        set_total_events: Deprecated compatibility argument. fcswrite sets $TOT
+            from the written data shape.
 
     Returns:
         Cleaned metadata dict ready for fcswrite
@@ -111,6 +130,10 @@ def _clean_metadata(
         'begindata', 'enddata', 'begintext', 'endtext',
         'beginanalysis', 'endanalysis', 'beginstext', 'endstext', 'nextdata',
     }
+    writer_managed_to_strip = {
+        'byteord', 'datatype', 'mode', 'tot', 'par',
+    }
+    parameter_suffixes_to_strip = {'b', 'e', 'n', 'r', 'd'}
 
     cleaned: Dict[str, str] = {}
     for key, value in meta_raw.items():
@@ -124,12 +147,18 @@ def _clean_metadata(
         if key_str.startswith('_'):
             continue
 
-        # Skip structural byte offsets (fcswrite recalculates)
-        if key_normalized in structural_to_strip:
+        # Skip structural/writer-owned fields (fcswrite recalculates them)
+        if key_normalized in structural_to_strip or key_normalized in writer_managed_to_strip:
             continue
 
-        # Skip $PAR (parameter count changes when we add columns)
-        if key_normalized == 'par':
+        # Skip parameter fields owned by fcswrite. Other parameter metadata
+        # such as $PnS/$PnG/$PnV can still be preserved for original channels.
+        if (
+            len(key_normalized) >= 3
+            and key_normalized[0] == 'p'
+            and key_normalized[1:-1].isdigit()
+            and key_normalized[-1] in parameter_suffixes_to_strip
+        ):
             continue
 
         # Determine output key format
@@ -154,11 +183,7 @@ def _clean_metadata(
 
         cleaned[output_key] = _stringify_meta_value(value)
 
-    # Override $TOT only if explicitly requested (for filtered outputs)
-    if set_total_events is not None:
-        cleaned['$TOT'] = str(set_total_events)
-
-    return cleaned
+    return _prepare_fcs_text_metadata(cleaned)
 
 
 def _ensure_numpy(vector: Any) -> np.ndarray:
@@ -211,19 +236,18 @@ def write_filtered_fcs_files(
         filter_output_path.mkdir(parents=True, exist_ok=True)
         output_file_path = filter_output_path / f"{base_name}.fcs"
 
-        filtered_meta = _clean_metadata(
-            meta_raw=meta_raw,
-            set_total_events=len(filtered_data),
-        )
+        filtered_meta = _clean_metadata(meta_raw=meta_raw)
         filtered_meta['flowmop_filtered'] = 'true'
         filtered_meta['flowmop_filtered_type'] = filter_def['name']
         filtered_meta['flowmop_filtered_source'] = f"flowmop_{base_name}.fcs"
 
         fcswrite.write_fcs(
             filename=str(output_file_path),
-            chn_names=output_channel_names,
+            chn_names=output_channel_names.copy(),
             data=filtered_data,
-            text_kw_pr=filtered_meta,
+            text_kw_pr=_prepare_fcs_text_metadata(
+                _ensure_marker_keywords(filtered_meta, output_channel_names)
+            ),
             compat_chn_names=True,
             compat_copy=True,
             compat_negative=True,
@@ -516,10 +540,12 @@ def process_file(
         print(f"Exporting to FCS file: {fcs_output_file}")
         print(f"Preserving {len(complete_metadata)} metadata fields (excluding structural channel defs)")
         fcswrite.write_fcs(
-            filename=str(fcs_output_file), 
-            chn_names=output_channel_names,
+            filename=str(fcs_output_file),
+            chn_names=output_channel_names.copy(),
             data=output_data,
-            text_kw_pr=complete_metadata,
+            text_kw_pr=_prepare_fcs_text_metadata(
+                _ensure_marker_keywords(complete_metadata, output_channel_names)
+            ),
             compat_chn_names=True,
             compat_copy=True,
             compat_negative=True,

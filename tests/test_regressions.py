@@ -214,7 +214,12 @@ def test_filtered_writer_uses_numpy_output_arrays(tmp_path, monkeypatch):
         "passed_final",
     ]
     writes = []
-    monkeypatch.setattr(fcswrite, "write_fcs", lambda **kwargs: writes.append(kwargs), raising=False)
+
+    def fake_write_fcs(**kwargs):
+        kwargs["chn_names"].append("mutated_by_writer")
+        writes.append(kwargs)
+
+    monkeypatch.setattr(fcswrite, "write_fcs", fake_write_fcs, raising=False)
 
     flowmop_exec.write_filtered_fcs_files(
         tmp_path,
@@ -231,6 +236,31 @@ def test_filtered_writer_uses_numpy_output_arrays(tmp_path, monkeypatch):
         "doubletpass",
     }
     assert all(call["data"].shape[1] == len(output_channel_names) for call in writes)
+    assert all("$P6S" in call["text_kw_pr"] for call in writes)
+    assert all(call["text_kw_pr"]["$P6S"] == "passed_final" for call in writes)
+    assert "mutated_by_writer" not in output_channel_names
+
+
+def test_fcs_metadata_sanitizes_delimiter_and_writer_managed_fields(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+
+    flowmop_exec = importlib.import_module("flowmop_exec")
+    flowmop_exec = importlib.reload(flowmop_exec)
+
+    metadata = flowmop_exec._clean_metadata(
+        {
+            "tot": "2",
+            "$P1B": "32",
+            "$P1S": "FSC/Area",
+            "comment": "path /tmp/sample\nnext",
+        },
+        set_total_events=2,
+    )
+
+    assert "$TOT" not in metadata
+    assert "$P1B" not in metadata
+    assert metadata["$P1S"] == "FSC|Area"
+    assert metadata["COMMENT"] == "path |tmp|sample next"
 
 
 def test_flowmop_exec_help_is_import_safe():
