@@ -53,12 +53,6 @@ FILTERED_OUTPUT_DIR=""
 DRY_RUN=0
 VERBOSE=0
 
-# Check if parallel is installed
-if ! command -v parallel &> /dev/null; then
-    echo "Error: GNU Parallel is not installed. Please install it to use this script."
-    exit 1
-fi
-
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -194,7 +188,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --plots-dir <dir>           Directory for time gate plots (default: time_gate_plots)"
             echo "  --enable-ssc                Use SSC-A for debris gating in addition to FSC-A"
             echo "  --remove-beads              Detect and remove beads based on SSC/FSC"
-            echo "  --disable-dask              Disable Dask parallel processing"
+            echo "  --disable-dask              Disable within-file gate parallelism"
             echo "  --export-filtered-fcs       Export filtered FCS subsets (passfiltered, timepass, etc.)"
             echo "  --filtered-output-dir <dir> Directory for filtered FCS output (default: output-dir)"
             echo ""
@@ -217,8 +211,14 @@ while [[ $# -gt 0 ]]; do
             echo "Use --help for usage information."
             exit 1
             ;;
-    esac
+	esac
 done
+
+# Check if parallel is installed after parsing so --help remains available.
+if ! command -v parallel &> /dev/null; then
+    echo "Error: GNU Parallel is not installed. Please install it to use this script."
+    exit 1
+fi
 
 # Validate required arguments
 if [[ -z "$INPUT_DIR" ]]; then
@@ -258,7 +258,11 @@ if [[ $SKIP_PROCESSED -eq 1 ]]; then
         base_name=$(basename "$file" | sed 's/_processed\.fcs$//')
         PROCESSED_FILES+=("$base_name")
     done < <(find "$OUTPUT_DIR" -name "*_processed.fcs" -type f)
-    
+    while IFS= read -r file; do
+        base_name=$(basename "$file" | sed 's/^flowmop_//' | sed 's/\.[^.]*$//')
+        PROCESSED_FILES+=("$base_name")
+    done < <(find "$OUTPUT_DIR" -name "flowmop_*.fcs" -type f)
+
     FILTERED_FILES=()
     for file in "${FILES[@]}"; do
         base_name=$(basename "$file" | sed 's/\.[^.]*$//')
@@ -273,14 +277,14 @@ if [[ $SKIP_PROCESSED -eq 1 ]]; then
             FILTERED_FILES+=("$file")
         fi
     done
-    
+
     skipped=$((${#FILES[@]} - ${#FILTERED_FILES[@]}))
     if [[ $skipped -gt 0 ]]; then
         echo "Skipping $skipped already processed files"
     fi
-    
+
     FILES=("${FILTERED_FILES[@]}")
-    
+
     if [[ ${#FILES[@]} -eq 0 ]]; then
         echo "All files already processed"
         exit 0

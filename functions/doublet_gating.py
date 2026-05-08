@@ -5,7 +5,6 @@ Handles detection and removal of doublets in flow cytometry data.
 
 import numpy as np
 import dask.array as da
-import dask
 from abc import ABC, abstractmethod
 import warnings
 from scipy import stats
@@ -58,71 +57,32 @@ class DoubletGateStrategy(ABC):
         except ValueError:
             raise ValueError("Required scatter parameters not found.")
         
-        # Set negative values to 0 and clip top 0.1 percentile outliers
-        if self.enable_dask and isinstance(data, da.Array):
-            # For Dask arrays, use da.clip
-            scatter_data = da.clip(
-                data[:, [fsc_a_idx, fsc_h_idx, ssc_a_idx, ssc_h_idx]], 
-                0, 
-                None
-            )
-            
-            # Calculate 99.9th percentile for each channel
-            p999 = []
-            for i, idx in enumerate([fsc_a_idx, fsc_h_idx, ssc_a_idx, ssc_h_idx]):
-                # Create a delayed computation for percentile
-                p999.append(dask.delayed(np.percentile)(data[:, idx].compute(), 99.9))
-                
-            # Compute all percentiles at once
-            p999 = dask.compute(*p999)
-            
-            # Clip values above 99.9th percentile
-            for i, idx in enumerate([fsc_a_idx, fsc_h_idx, ssc_a_idx, ssc_h_idx]):
-                scatter_data[:, i] = da.clip(scatter_data[:, i], None, p999[i])
-                
-            # Calculate ratios with handling for division by zero
-            fsc_ratio = da.divide(
-                scatter_data[:, 0], 
-                scatter_data[:, 1], 
-                out=da.full_like(scatter_data[:, 0], np.nan), 
-                where=scatter_data[:, 1] > 0
-            )
-            
-            ssc_ratio = da.divide(
-                scatter_data[:, 2], 
-                scatter_data[:, 3], 
-                out=da.full_like(scatter_data[:, 2], np.nan), 
-                where=scatter_data[:, 3] > 0
-            )
-            
-        else:
-            # For NumPy arrays, use np.clip
-            scatter_data = np.clip(
-                data[:, [fsc_a_idx, fsc_h_idx, ssc_a_idx, ssc_h_idx]], 
-                0, 
-                None
-            )
-            
-            # Calculate 99.9th percentile for each channel and clip values above it
-            for i, idx in enumerate([fsc_a_idx, fsc_h_idx, ssc_a_idx, ssc_h_idx]):
-                p999 = np.percentile(data[:, idx], 99.9)
-                scatter_data[:, i] = np.clip(scatter_data[:, i], None, p999)
-                
-            # Calculate ratios with handling for division by zero
-            fsc_ratio = np.divide(
-                scatter_data[:, 0], 
-                scatter_data[:, 1], 
-                out=np.full_like(scatter_data[:, 0], np.nan), 
-                where=scatter_data[:, 1] > 0
-            )
-            
-            ssc_ratio = np.divide(
-                scatter_data[:, 2], 
-                scatter_data[:, 3], 
-                out=np.full_like(scatter_data[:, 2], np.nan), 
-                where=scatter_data[:, 3] > 0
-            )
-            
+        if isinstance(data, da.Array):
+            data = data.compute()
+
+        scatter_data = np.asarray(
+            data[:, [fsc_a_idx, fsc_h_idx, ssc_a_idx, ssc_h_idx]],
+            dtype=float,
+        )
+        np.maximum(scatter_data, 0, out=scatter_data)
+
+        p999 = np.percentile(scatter_data, 99.9, axis=0)
+        scatter_data = np.minimum(scatter_data, p999)
+
+        fsc_ratio = np.divide(
+            scatter_data[:, 0],
+            scatter_data[:, 1],
+            out=np.full(scatter_data.shape[0], np.nan, dtype=float),
+            where=scatter_data[:, 1] > 0,
+        )
+
+        ssc_ratio = np.divide(
+            scatter_data[:, 2],
+            scatter_data[:, 3],
+            out=np.full(scatter_data.shape[0], np.nan, dtype=float),
+            where=scatter_data[:, 3] > 0,
+        )
+
         return fsc_ratio, ssc_ratio
 
     @staticmethod
@@ -224,80 +184,42 @@ class MADDoubletGate(DoubletGateStrategy):
         Returns:
             Tuple of (filtered_array, doublet_gate_vector)
         """
-        # Ensure data is in Dask array format if Dask is enabled
-        if self.enable_dask and not isinstance(data, da.Array):
-            data = da.from_array(data, chunks=(self.chunk_size or 'auto', -1))
+        if isinstance(data, da.Array):
+            data = data.compute()
             
         # Check if required parameters are present
         if not self._check_required_parameters(marker_names):
-            if self.enable_dask and isinstance(data, da.Array):
-                return data, da.ones(data.shape[0], chunks=data.chunks[0], dtype=np.int32)
-            else:
-                return data, np.ones(data.shape[0], dtype=np.int32)
+            return data, np.ones(data.shape[0], dtype=np.int32)
                 
         # Calculate aspect ratios
         fsc_ratio, ssc_ratio = self._calculate_ratios(data, marker_names)
-        
-        if self.enable_dask:
-            # Create delayed functions for MAD calculation
-            @dask.delayed
-            def calculate_mad_threshold(ratio):
-                # Remove NaN values
-                ratio = ratio[~np.isnan(ratio)]
-                # Calculate median
-                median = np.median(ratio)
-                # Calculate MAD
-                mad = np.median(np.abs(ratio - median))
-                # Calculate threshold
-                return median + (self.mad_threshold * mad)
-                
-            # Calculate thresholds using delayed functions
-            fsc_threshold_delayed = calculate_mad_threshold(fsc_ratio.compute())
-            ssc_threshold_delayed = calculate_mad_threshold(ssc_ratio.compute())
-            
-            # Compute thresholds
-            fsc_threshold, ssc_threshold = dask.compute(fsc_threshold_delayed, ssc_threshold_delayed)
-            
-            # Create gate vectors
-            fsc_gate = (fsc_ratio <= fsc_threshold).astype(np.int32)
-            ssc_gate = (ssc_ratio <= ssc_threshold).astype(np.int32)
-            
-            # Combine gates
-            doublet_gate = fsc_gate & ssc_gate
-            
-            # Filter data
-            filtered_data = data[doublet_gate > 0]
-            
-            return filtered_data, doublet_gate
-        else:
-            # For NumPy arrays, compute directly
-            # Remove NaN values
-            fsc_ratio_clean = fsc_ratio[~np.isnan(fsc_ratio)]
-            ssc_ratio_clean = ssc_ratio[~np.isnan(ssc_ratio)]
-            
-            # Calculate medians
-            fsc_median = np.median(fsc_ratio_clean)
-            ssc_median = np.median(ssc_ratio_clean)
-            
-            # Calculate MADs
-            fsc_mad = np.median(np.abs(fsc_ratio_clean - fsc_median))
-            ssc_mad = np.median(np.abs(ssc_ratio_clean - ssc_median))
-            
-            # Calculate thresholds
-            fsc_threshold = fsc_median + (self.mad_threshold * fsc_mad)
-            ssc_threshold = ssc_median + (self.mad_threshold * ssc_mad)
-            
-            # Create gate vectors
-            fsc_gate = (fsc_ratio <= fsc_threshold).astype(np.int32)
-            ssc_gate = (ssc_ratio <= ssc_threshold).astype(np.int32)
-            
-            # Combine gates
-            doublet_gate = fsc_gate & ssc_gate
-            
-            # Filter data
-            filtered_data = data[doublet_gate > 0]
-            
-            return filtered_data, doublet_gate
+
+        fsc_ratio_clean = fsc_ratio[~np.isnan(fsc_ratio)]
+        ssc_ratio_clean = ssc_ratio[~np.isnan(ssc_ratio)]
+
+        if fsc_ratio_clean.size == 0 or ssc_ratio_clean.size == 0:
+            warnings.warn("No finite doublet ratio values remain. Skipping doublet removal.")
+            return data, np.ones(data.shape[0], dtype=np.int32)
+
+        fsc_median = np.median(fsc_ratio_clean)
+        ssc_median = np.median(ssc_ratio_clean)
+
+        fsc_mad = np.median(np.abs(fsc_ratio_clean - fsc_median))
+        ssc_mad = np.median(np.abs(ssc_ratio_clean - ssc_median))
+
+        fsc_threshold = fsc_median + (self.mad_threshold * fsc_mad)
+        ssc_threshold = ssc_median + (self.mad_threshold * ssc_mad)
+
+        if not np.isfinite(fsc_threshold) or not np.isfinite(ssc_threshold):
+            warnings.warn("Doublet ratio threshold is not finite. Skipping doublet removal.")
+            return data, np.ones(data.shape[0], dtype=np.int32)
+
+        fsc_gate = (fsc_ratio <= fsc_threshold).astype(np.int32)
+        ssc_gate = (ssc_ratio <= ssc_threshold).astype(np.int32)
+        doublet_gate = fsc_gate & ssc_gate
+        filtered_data = data[doublet_gate > 0]
+
+        return filtered_data, doublet_gate
 
 class InflectionDoubletGate(DoubletGateStrategy):
     """
@@ -333,16 +255,12 @@ class InflectionDoubletGate(DoubletGateStrategy):
             tuple: (filtered_data, doublet_vector)
         """
         self._debug_info = {}  # Reset debug info for each call
-        # Ensure data is in Dask array format if Dask is enabled
-        if self.enable_dask and not isinstance(data, da.Array):
-            data = da.from_array(data, chunks=(self.chunk_size or 'auto', -1))
+        if isinstance(data, da.Array):
+            data = data.compute()
             
         # Check if required parameters are present
         if not self._check_required_parameters(marker_names):
-            if self.enable_dask and isinstance(data, da.Array):
-                return data, da.ones(data.shape[0], chunks=data.chunks[0], dtype=np.int32)
-            else:
-                return data, np.ones(data.shape[0], dtype=np.int32)
+            return data, np.ones(data.shape[0], dtype=np.int32)
                 
         # Calculate aspect ratios for both FSC and SSC
         fsc_ratio, ssc_ratio = self._calculate_ratios(data, marker_names)
@@ -352,15 +270,8 @@ class InflectionDoubletGate(DoubletGateStrategy):
         fsc_ratio_np: np.ndarray
         ssc_ratio_np: np.ndarray
 
-        if isinstance(fsc_ratio, da.Array):
-            fsc_ratio_np = fsc_ratio.compute()
-        else: # Already a numpy array or enable_dask is False
-            fsc_ratio_np = fsc_ratio 
-        
-        if isinstance(ssc_ratio, da.Array):
-            ssc_ratio_np = ssc_ratio.compute()
-        else: # Already a numpy array or enable_dask is False
-            ssc_ratio_np = ssc_ratio
+        fsc_ratio_np = np.asarray(fsc_ratio)
+        ssc_ratio_np = np.asarray(ssc_ratio)
         
         self._debug_info['ratios_shapes'] = {'fsc_np_shape': fsc_ratio_np.shape, 'ssc_np_shape': ssc_ratio_np.shape}
 
@@ -420,7 +331,7 @@ class InflectionDoubletGate(DoubletGateStrategy):
             if np.isnan(ssc_threshold):
                 warnings.warn("SSC MAD threshold calculation resulted in NaN. SSC gating might be ineffective or filter all events.")
         
-        # Apply combined thresholds (using original fsc_ratio, ssc_ratio which can be Dask arrays)
+        # Apply combined thresholds. Non-finite threshold axes pass through.
         filtered_data, doublet_vector = self._apply_inflection_threshold(
             data, 
             fsc_ratio, 
@@ -446,16 +357,20 @@ class InflectionDoubletGate(DoubletGateStrategy):
         # Remove NaN values and restrict to biologically meaningful ratios (>= 1)
         data = data[~np.isnan(data)]
         data = data[data >= 1]  # Only consider ratios >= 1
-        
+
+        if data.size == 0:
+            warnings.warn("No valid ratio values remain for doublet histogram generation.")
+            return np.array([]), np.array([]), np.array([])
+
         # Clip outliers at 99th percentile
         q99 = np.percentile(data, 99)
         data = np.clip(data, None, q99)
         
         # Use process_histogram with a reasonable smoothing window
         hist_result = process_histogram(data, smoothing_window=5, num_bins=100)
-        
+
         if hist_result is None:
-            return np.array([]), np.array([])
+            return np.array([]), np.array([]), np.array([])
             
         smoothed_hist, bin_edges, peak_indices, peak_densities = hist_result
         
@@ -534,16 +449,17 @@ class InflectionDoubletGate(DoubletGateStrategy):
         Returns:
             tuple: (filtered_data, doublet_vector)
         """
-        # Handle Dask arrays appropriately
-        if self.enable_dask and (isinstance(fsc_ratio, da.Array) or isinstance(ssc_ratio, da.Array)):
-            doublet_vector = ((fsc_ratio <= fsc_threshold) & 
-                            (ssc_ratio <= ssc_threshold)).astype(np.int32)
-            filtered_data = data[doublet_vector == 1]
-        else:
-            doublet_vector = ((fsc_ratio <= fsc_threshold) & 
-                            (ssc_ratio <= ssc_threshold)).astype(np.int32)
-            filtered_data = data[doublet_vector == 1]
-            
+        fsc_gate = np.ones(len(fsc_ratio), dtype=bool)
+        ssc_gate = np.ones(len(ssc_ratio), dtype=bool)
+
+        if np.isfinite(fsc_threshold):
+            fsc_gate = fsc_ratio <= fsc_threshold
+        if np.isfinite(ssc_threshold):
+            ssc_gate = ssc_ratio <= ssc_threshold
+
+        doublet_vector = (fsc_gate & ssc_gate).astype(np.int32)
+        filtered_data = data[doublet_vector == 1]
+
         return filtered_data, doublet_vector
         
     def _get_threshold_from_inflection(self, ratio: np.ndarray, hist: tuple, inflections: np.ndarray) -> float:
@@ -580,15 +496,14 @@ class InflectionDoubletGate(DoubletGateStrategy):
         warnings.warn("Falling back to MAD-based thresholding")
         fsc_threshold = self._calculate_mad_threshold(fsc_ratio)
         ssc_threshold = self._calculate_mad_threshold(ssc_ratio)
-        
-        doublet_vector = ((fsc_ratio <= fsc_threshold) & 
-                         (ssc_ratio <= ssc_threshold)).astype(int)
-        filtered_data = data[doublet_vector == 1]
-        
-        return filtered_data, doublet_vector
+
+        return self._apply_inflection_threshold(data, fsc_ratio, ssc_ratio, fsc_threshold, ssc_threshold)
 
     def _calculate_mad_threshold(self, ratio: np.ndarray) -> float:
         """Fallback MAD-based threshold calculation."""
+        ratio = ratio[np.isfinite(ratio)]
+        if ratio.size == 0:
+            return np.inf
         median_ratio = np.nanmedian(ratio)
         mad = np.nanmedian(np.abs(ratio - median_ratio))
         return median_ratio + self.fallback_mad_threshold * mad

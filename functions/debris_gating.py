@@ -55,8 +55,9 @@ class FSCDebrisGate(DebrisGateStrategy):
         if not self._check_events_in_bottom_bin(data, marker_names):
             return DebrisGateResult(filtered_data=data, fsc_threshold=None, debris_vector=np.ones(data.shape[0], dtype=int), ssc_threshold=None, beads_threshold=None)
 
-        # Set negative fluorescence values to 0
-        data = np.where(data < 0, 0, data)
+        if np.any(data < 0):
+            data = data.copy()
+            data[data < 0] = 0
 
         valid_peaks_mask, peaks_list, positive_masks = detect_fluoropeaks(
             data.T, 
@@ -65,7 +66,8 @@ class FSCDebrisGate(DebrisGateStrategy):
             max_peaks=self.max_peaks,
             smoothing_window=self.smoothing_window,
             percentage_cells_present=self.percentage_cells_present,
-            num_bins=self.num_bins
+            num_bins=self.num_bins,
+            enable_dask=self.enable_dask,
         )
 
         # FSC gating (always performed)
@@ -129,30 +131,44 @@ class FSCDebrisGate(DebrisGateStrategy):
         )
 
     def _check_events_in_bottom_bin(self, fcs_array: np.ndarray, marker_names: list[str]) -> bool:
-        """Check if events exist in the bottom 10th bin of FSC-A and SSC-A."""
+        """Check if events exist in the bottom 10th bin of required scatter channels."""
         standardized_names = [standardize_marker_name(name) for name in marker_names]
-        
+
         try:
             fsc_a_column = standardized_names.index('fsca')
-            ssc_a_column = standardized_names.index('ssca')
         except ValueError:
-            warnings.warn("Required FSC-A or SSC-A parameters not found.")
+            warnings.warn("Required FSC-A parameter not found.")
             return False
 
         fsc_a_max = np.max(fcs_array[:, fsc_a_column])
-        ssc_a_max = np.max(fcs_array[:, ssc_a_column])
-        
         fsc_a_bottom_10th = fsc_a_max * 0.1
-        ssc_a_bottom_10th = ssc_a_max * 0.1
-        
-        events_in_bottom_bin = np.any(
-            (fcs_array[:, fsc_a_column] <= fsc_a_bottom_10th) & 
-            (fcs_array[:, ssc_a_column] <= ssc_a_bottom_10th)
-        )
-        
+
+        if self.enable_ssc:
+            try:
+                ssc_a_column = standardized_names.index('ssca')
+            except ValueError:
+                warnings.warn("SSC-A parameter not found; SSC-assisted debris removal will be skipped.")
+                events_in_bottom_bin = np.any(fcs_array[:, fsc_a_column] <= fsc_a_bottom_10th)
+                scatter_description = "FSC-A"
+                if not events_in_bottom_bin:
+                    warnings.warn(f"No events found in the bottom 10th bin of {scatter_description}. Debris removal will be skipped.")
+                return events_in_bottom_bin
+
+            ssc_a_max = np.max(fcs_array[:, ssc_a_column])
+            ssc_a_bottom_10th = ssc_a_max * 0.1
+
+            events_in_bottom_bin = np.any(
+                (fcs_array[:, fsc_a_column] <= fsc_a_bottom_10th) &
+                (fcs_array[:, ssc_a_column] <= ssc_a_bottom_10th)
+            )
+            scatter_description = "FSC-A and SSC-A"
+        else:
+            events_in_bottom_bin = np.any(fcs_array[:, fsc_a_column] <= fsc_a_bottom_10th)
+            scatter_description = "FSC-A"
+
         if not events_in_bottom_bin:
-            warnings.warn("No events found in the bottom 10th bin of FSC-A and SSC-A. Debris removal will be skipped.")
-        
+            warnings.warn(f"No events found in the bottom 10th bin of {scatter_description}. Debris removal will be skipped.")
+
         return events_in_bottom_bin
 
     def _get_fsc_column(self, marker_names: list[str]) -> int:
@@ -497,24 +513,24 @@ class FSCDebrisGate(DebrisGateStrategy):
         
         return beads_vector, beads_threshold
     
-def detect_fluoropeaks(data: np.ndarray, marker_names: List[str], min_peaks: int = 2, max_peaks: int = 5, 
-                         smoothing_window: int = 2, percentage_cells_present: float = 5, num_bins: int = 100) -> Tuple[np.ndarray, List[List[Peak]], List[np.ndarray]]:
+def detect_fluoropeaks(data: np.ndarray, marker_names: List[str], min_peaks: int = 2, max_peaks: int = 5,
+                         smoothing_window: int = 2, percentage_cells_present: float = 5,
+                         num_bins: int = 100, enable_dask: bool = True) -> Tuple[np.ndarray, List[List[Peak]], List[np.ndarray]]:
     """Detect debris peaks in the data."""
     num_features, num_samples = data.shape
-    data_transformed = np.arcsinh(data / 150)
     peaks_list = []
     valid_peaks_mask = np.zeros(num_features, dtype=bool)
     positive_masks = []  # Store positive masks for each feature
     
-    # Define a function to process a single marker
-    @dask.delayed
-    def process_marker(i, marker, data_transformed, smoothing_window, min_peaks, max_peaks, percentage_cells_present):
+    def process_marker(i, marker, feature_matrix, smoothing_window, min_peaks, max_peaks, percentage_cells_present):
         # Skip excluded channels
         if is_excluded_marker(marker):
             return i, [], None
             
+        feature_data = np.arcsinh(feature_matrix[i] / 150)
+
         # Process histogram and get peaks
-        result = process_histogram(data_transformed[i], smoothing_window)
+        result = process_histogram(feature_data, smoothing_window)
         if result is None:
             print(f"No valid histogram for marker {marker}")
             return i, [], None
@@ -547,19 +563,25 @@ def detect_fluoropeaks(data: np.ndarray, marker_names: List[str], min_peaks: int
         # If we have at least 2 peaks, calculate positive cells
         if len(peaks) >= 2:
             second_peak = peaks[1]
-            positive_mask = data_transformed[i] >= second_peak.start
+            positive_mask = feature_data >= second_peak.start
             return i, peaks, positive_mask
         else:
             print(f"Not enough valid peaks after width analysis for marker {marker}")
             return i, peaks, None
     
-    # Create delayed tasks for all markers
-    delayed_results = [process_marker(i, marker, data_transformed, smoothing_window, 
-                                     min_peaks, max_peaks, percentage_cells_present) 
-                      for i, marker in enumerate(marker_names)]
-    
-    # Compute all results in parallel
-    computed_results = dask.compute(*delayed_results)
+    if enable_dask:
+        delayed_results = [
+            dask.delayed(process_marker)(
+                i, marker, data, smoothing_window, min_peaks, max_peaks, percentage_cells_present
+            )
+            for i, marker in enumerate(marker_names)
+        ]
+        computed_results = dask.compute(*delayed_results)
+    else:
+        computed_results = [
+            process_marker(i, marker, data, smoothing_window, min_peaks, max_peaks, percentage_cells_present)
+            for i, marker in enumerate(marker_names)
+        ]
     
     # Process the results
     for idx, peaks, positive_mask in computed_results:

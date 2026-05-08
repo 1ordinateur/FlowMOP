@@ -207,16 +207,15 @@ def output_complete_flowmop(input_directory: str, output_directory: Optional[str
 
         for f in filters_to_apply:
             resolved_cols = []
-            for group in f['columns']:
-                resolved = next((c for c in group if c in data.columns), None)
-                if resolved is None:
+            for required_col in f['columns']:
+                if required_col not in data.columns:
                     break
-                resolved_cols.append(resolved)
+                resolved_cols.append(required_col)
 
             if len(resolved_cols) != len(f['columns']):
                 logger.warning(
                     f"Skipping filter {f['name']} for {fcs_file.name}, "
-                    f"missing one or more required columns from groups: {f['columns']}"
+                    f"missing one or more required columns: {f['columns']} "
                     f"Data columns: {data.columns.tolist()}"
                 )
                 continue

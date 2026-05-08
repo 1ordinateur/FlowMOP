@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,6 +18,8 @@ def _ensure_dependencies() -> Dict[str, Any]:
         'pandas',
         'readfcs',
         'fcswrite',
+        'scipy',
+        'matplotlib',
         'dask.array',
         'dask.distributed',
     ]
@@ -28,7 +32,7 @@ def _ensure_dependencies() -> Dict[str, Any]:
             missing.append(module_name)
 
     if missing:
-        install_cmd = "pip install numpy pandas dask readfcs fcswrite"
+        install_cmd = "pip install numpy pandas scipy matplotlib dask distributed readfcs fcswrite"
         raise ImportError(
             "Missing dependencies: "
             f"{', '.join(missing)}. "
@@ -38,14 +42,29 @@ def _ensure_dependencies() -> Dict[str, Any]:
     return modules
 
 
-_deps = _ensure_dependencies()
-np = _deps['numpy']
-pd = _deps['pandas']
-readfcs = _deps['readfcs']
-fcswrite = _deps['fcswrite']
-# Dask modules are validated by _ensure_dependencies but used internally by flowmop_new
+DEFAULT_MAD_SMOOTHING = [0.1, 0.9]
 
-from base import flowmop_new
+np = None
+pd = None
+readfcs = None
+fcswrite = None
+flowmop_new = None
+
+
+def _load_dependencies() -> None:
+    """Load runtime dependencies lazily so CLI help remains available."""
+    global np, pd, readfcs, fcswrite, flowmop_new
+    if np is not None:
+        return
+
+    deps = _ensure_dependencies()
+    np = deps['numpy']
+    pd = deps['pandas']
+    readfcs = deps['readfcs']
+    fcswrite = deps['fcswrite']
+
+    from base import flowmop_new as loaded_flowmop_new
+    flowmop_new = loaded_flowmop_new
 
 def _stringify_meta_value(value: Any) -> str:
     """Convert metadata values to strings for FCS writing."""
@@ -144,6 +163,7 @@ def _clean_metadata(
 
 def _ensure_numpy(vector: Any) -> np.ndarray:
     """Convert a vector that may be a Dask array to a NumPy array."""
+    _load_dependencies()
     if hasattr(vector, "compute"):
         return np.asarray(vector.compute())
     return np.asarray(vector)
@@ -152,35 +172,38 @@ def _ensure_numpy(vector: Any) -> np.ndarray:
 def write_filtered_fcs_files(
     base_output_dir: Path,
     base_name: str,
-    output_df: pd.DataFrame,
+    output_data: np.ndarray,
+    output_channel_names: List[str],
     meta_raw: Dict[str, Any],
 ) -> None:
     """
     Optionally emit filtered FCS files (subset of events) based on gate columns.
     This is an opt-in pathway and should not be used for the canonical output.
     """
+    _load_dependencies()
     filters_to_apply = [
         {'name': 'passfiltered', 'columns': ['passed_final']},
         {'name': 'timepass', 'columns': ['passed_time', 'passed_lod']},
         {'name': 'debrispass', 'columns': ['passed_debris', 'passed_lod']},
         {'name': 'doubletpass', 'columns': ['passed_doublet', 'passed_lod']},
     ]
+    column_index = {name: index for index, name in enumerate(output_channel_names)}
 
     for filter_def in filters_to_apply:
         required_cols = filter_def['columns']
-        if not all(col in output_df.columns for col in required_cols):
+        if not all(col in column_index for col in required_cols):
             print(
                 f"Skipping filter {filter_def['name']} for {base_name}: "
                 f"missing columns {required_cols}"
             )
             continue
 
-        mask = np.ones(len(output_df), dtype=bool)
+        mask = np.ones(output_data.shape[0], dtype=bool)
         for col in required_cols:
-            mask &= output_df[col].values > 0
+            mask &= output_data[:, column_index[col]] > 0
 
-        filtered_df = output_df.loc[mask]
-        if filtered_df.empty:
+        filtered_data = output_data[mask]
+        if filtered_data.size == 0:
             print(f"Filter {filter_def['name']}: no events passed for {base_name}, skipping.")
             continue
 
@@ -190,7 +213,7 @@ def write_filtered_fcs_files(
 
         filtered_meta = _clean_metadata(
             meta_raw=meta_raw,
-            set_total_events=len(filtered_df),
+            set_total_events=len(filtered_data),
         )
         filtered_meta['flowmop_filtered'] = 'true'
         filtered_meta['flowmop_filtered_type'] = filter_def['name']
@@ -198,8 +221,8 @@ def write_filtered_fcs_files(
 
         fcswrite.write_fcs(
             filename=str(output_file_path),
-            chn_names=filtered_df.columns.tolist(),
-            data=filtered_df.values,
+            chn_names=output_channel_names,
+            data=filtered_data,
             text_kw_pr=filtered_meta,
             compat_chn_names=True,
             compat_copy=True,
@@ -209,7 +232,7 @@ def write_filtered_fcs_files(
 
         print(
             f"Created filtered file {output_file_path} "
-            f"with {len(filtered_df)} events ({filter_def['name']})"
+            f"with {len(filtered_data)} events ({filter_def['name']})"
         )
 
 def load_data(file_path: str) -> Tuple[Dict[str, Any], pd.DataFrame, List[str]]:
@@ -223,6 +246,7 @@ def load_data(file_path: str) -> Tuple[Dict[str, Any], pd.DataFrame, List[str]]:
     Returns:
         tuple: (meta_raw, data_frame, canonical_channel_names)
     """
+    _load_dependencies()
     file_path = Path(file_path)
     
     if file_path.suffix.lower() == '.fcs':
@@ -336,6 +360,7 @@ def process_file(
     filtered_output_dir: Optional[str] = None,
 ) -> None:
     """
+    _load_dependencies()
     Process a data file through the FlowMOP pipeline.
     
     Args:
@@ -359,7 +384,7 @@ def process_file(
         max_bins: Maximum number of bins to divide data into
         step_val: Step size for binning
         mad_factor: Factor for MAD calculation for gating
-        enable_dask: Whether to use Dask for parallel processing
+        enable_dask: Whether to use within-file gate parallelism
         export_filtered_fcs: If True, also emit filtered/subset FCS files
         filtered_output_dir: Optional directory for filtered FCS (defaults to output_dir or input dir)
     """
@@ -383,7 +408,7 @@ def process_file(
     
     # Set default mad_smoothing if not provided
     if mad_smoothing is None:
-        mad_smoothing = [0.01, 1.0]
+        mad_smoothing = DEFAULT_MAD_SMOOTHING.copy()
     
     # Initialize FlowMOP
     flowmop = flowmop_new.FlowMOP(
@@ -451,15 +476,18 @@ def process_file(
         # Use flowmop_ prefix as specified
         fcs_output_file = output_path / f"flowmop_{base_name}.fcs"
         
-        # Create a pandas DataFrame with the original data
-        output_df = pd.DataFrame(fcs_array, columns=marker_names)
-        
-        # Add filter vectors as additional columns (appended after original channels)
+        output_channel_names = list(marker_names)
+        output_columns = [fcs_array]
+        existing_columns = set(output_channel_names)
         for name, vector in vectors.items():
             col_name = f'passed_{name}'
-            if col_name in output_df.columns:
+            if col_name in existing_columns:
                 continue
-            output_df[col_name] = vector.astype(int)
+            output_channel_names.append(col_name)
+            existing_columns.add(col_name)
+            output_columns.append(vector.astype(int, copy=False).reshape(-1, 1))
+
+        output_data = np.column_stack(output_columns)
         
         # Prepare metadata: preserve all original metadata, only strip structural offsets and $PAR
         complete_metadata = _clean_metadata(meta_raw=meta_raw)
@@ -487,10 +515,6 @@ def process_file(
         # Write to FCS file with metadata preservation
         print(f"Exporting to FCS file: {fcs_output_file}")
         print(f"Preserving {len(complete_metadata)} metadata fields (excluding structural channel defs)")
-        # Extract data and channel names from the DataFrame
-        output_data = output_df.values
-        output_channel_names = output_df.columns.tolist()
-    
         fcswrite.write_fcs(
             filename=str(fcs_output_file), 
             chn_names=output_channel_names,
@@ -510,7 +534,8 @@ def process_file(
             write_filtered_fcs_files(
                 base_output_dir=subset_dir,
                 base_name=base_name,
-                output_df=output_df,
+                output_data=output_data,
+                output_channel_names=output_channel_names,
                 meta_raw=meta_raw,
             )
 
@@ -520,7 +545,7 @@ def main():
     parser.add_argument('--output-dir', help='Directory to save output files')
     parser.add_argument('--fluor-mode', choices=['positives', 'geomean', 'positive_geomeans', 'both'], default='positive_geomeans',
                         help='Mode for fluorescence anomaly detection (default: positive_geomeans)')
-    parser.add_argument('--mad-smoothing', type=float, nargs='+', default=[0.1, 0.9],
+    parser.add_argument('--mad-smoothing', type=float, nargs='+', default=DEFAULT_MAD_SMOOTHING.copy(),
                         help='Smoothing factors for MAD-based time gating (default: 0.1 0.9)')
     parser.add_argument('--enable-plots', action='store_true', default=False, help='Generate time gate plots for each channel')
     parser.add_argument('--plots-dir', type=str, default='time_gate_plots', help='Directory to save time gate plots')
@@ -538,7 +563,8 @@ def main():
     parser.add_argument('--step-val', type=int, default=200, help='Step size for binning (default: 200)')
     parser.add_argument('--mad-factor', type=int, default=4, help='Factor for MAD calculation for gating (default: 4)')
     parser.add_argument('--disable-remove-zeros', action='store_false', dest='remove_zeros', help='Disable removal of zero values (zeros are removed by default)')
-    parser.add_argument('--disable-dask', action='store_false', dest='enable_dask', help='Disable Dask for parallel processing (Dask is enabled by default)')
+    parser.add_argument('--disable-dask', action='store_false', dest='enable_dask',
+                        help='Disable within-file gate parallelism (enabled by default)')
     parser.add_argument('--export-filtered-fcs', action='store_true', default=False,
                         help='Also emit filtered FCS files (subsetted events) in addition to the annotated output')
     parser.add_argument('--filtered-output-dir', type=str,

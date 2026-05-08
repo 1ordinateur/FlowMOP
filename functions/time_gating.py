@@ -14,7 +14,6 @@ from functions.flowmop_utils import process_histogram, Peak  # Changed to relati
 from functions.flowmop_utils import normalize_timeseries_values, apply_spline_smoothing, calculate_mad_thresholds
 import matplotlib.pyplot as plt
 import logging
-from pathlib import Path
 
 class TimeGateStrategy(ABC):
     @abstractmethod
@@ -52,8 +51,8 @@ class MADTimeGate(TimeGateStrategy):
         plots_dir (str): Directory to save diagnostic plots
     """
     def __init__(self, remove_zeros=True, min_cells=150, max_bins=500, step=200, mad_threshold=6, 
-                 peak_removal=1/3, min_nr_bins_peakdetection=5, histogram_smoothing=5, mad_method='all', 
-                 mad_smoothing=[0.1, 1.0], enable_dask=True, fluor_mode='positives', enable_plots=False, 
+                 peak_removal=1/3, min_nr_bins_peakdetection=5, histogram_smoothing=5, mad_method='all',
+                 mad_smoothing=None, enable_dask=True, fluor_mode='positives', enable_plots=False,
                  plots_dir="time_gate_plots"):
         self.remove_zeros = remove_zeros
         self.min_cells = min_cells
@@ -64,7 +63,7 @@ class MADTimeGate(TimeGateStrategy):
         self.min_nr_bins_peakdetection = min_nr_bins_peakdetection
         self.histogram_smoothing = histogram_smoothing
         self.mad_method = mad_method
-        self.mad_smoothing = mad_smoothing
+        self.mad_smoothing = mad_smoothing if mad_smoothing is not None else [0.1, 0.9]
         self.plot_counter = 0
         self.enable_dask = enable_dask
         self.fluor_mode = fluor_mode  # 'positives', 'geomean', 'positive_geomeans', or 'both'
@@ -79,11 +78,8 @@ class MADTimeGate(TimeGateStrategy):
 
         # Configure logging
         self.logger = logging.getLogger('MADTimeGate')
-        self.logger.setLevel(logging.DEBUG)
-        log_file = Path('log_file.log')
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        self.logger.addHandler(file_handler)
+        if not self.logger.handlers:
+            self.logger.addHandler(logging.NullHandler())
 
     def gate(self, data: np.ndarray, time_channel_index: int, marker_names: list) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -522,13 +518,13 @@ class MADTimeGate(TimeGateStrategy):
         # Apply arcsinh transform
         processed_data = np.arcsinh(processed_data/150)
         
-        # Handle limit of detection (if >0.5% at max value)
+        # Handle limit of detection (if >0.5% at max value). Keep the
+        # original length so time-bin indices remain aligned with events.
         max_val = np.max(processed_data)
         pct_at_max = np.mean(processed_data == max_val) * 100
         if pct_at_max > 0.5:
-            # Drop everything above 99th percentile and below 1st percentile
             p99 = np.percentile(processed_data, 99)
-            processed_data = processed_data[(processed_data <= p99)]
+            processed_data = np.clip(processed_data, None, p99)
         
         # # Clip to 99th quantile
         p99 = np.quantile(processed_data, 0.99)

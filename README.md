@@ -26,15 +26,19 @@ FlowMOP requires the following Python packages:
 | `pandas` | Data manipulation |
 | `readfcs` | FCS file reading |
 | `fcswrite` | FCS file writing |
+| `scipy` | Histogram smoothing, interpolation, and statistics |
+| `matplotlib` | Diagnostic plot generation |
 | `dask` | Parallel array operations |
 | `distributed` | Dask distributed scheduler |
+| `fcsparser` | Optional fallback FCS reader |
+| `pyarrow` | Parquet file support through pandas |
 
 **Note:** `distributed` is installed separately from `dask`.
 
 ### Install Command
 
 ```bash
-pip install numpy pandas dask distributed readfcs fcswrite
+pip install -r requirements.txt
 ```
 
 ## Quick Start
@@ -142,7 +146,7 @@ python flowmop_exec.py [files] [options]
 | `--enable-ssc` | False | Use SSC-A for debris gating in addition to FSC-A |
 | `--remove-beads` | False | Detect and remove beads based on SSC/FSC characteristics |
 | `--disable-remove-zeros` | False | Disable removal of zero values (zeros removed by default) |
-| `--disable-dask` | False | Disable Dask for parallel processing |
+| `--disable-dask` | False | Disable within-file gate parallelism |
 
 ### Plotting Options
 
@@ -272,9 +276,9 @@ The `process_fcs_data()` method returns a dictionary of gate vectors:
 
 FlowMOP accepts Parquet files as input. When processing Parquet files, minimal synthetic metadata is created since Parquet files don't contain FCS metadata.
 
-### Dask Parallelization
+### Within-File Parallelism
 
-By default, FlowMOP uses Dask for parallel processing. Disable with `--disable-dask` for debugging or when processing small files where parallelization overhead exceeds benefits.
+By default, FlowMOP can run independent gates in parallel within a file. Disable with `--disable-dask` for debugging, batch jobs that already parallelize by file, or small files where parallel overhead exceeds benefits.
 
 ### Channel Naming
 
