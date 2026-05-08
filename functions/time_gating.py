@@ -883,6 +883,63 @@ class MADTimeGate(TimeGateStrategy):
         
         return channel_geomeans
 
+    def _calculate_positive_geomean_values(self, data: np.ndarray, valid_channels: List[int],
+                                           breaks: List[np.ndarray],
+                                           global_thresholds: Dict[int, float]) -> Dict[int, List[Tuple[int, float]]]:
+        """
+        Calculate per-bin positive-cell geomeans for all valid channels using
+        grouped NumPy reductions instead of a Python loop over every bin/channel.
+        """
+        valid_breaks = [(idx, indices) for idx, indices in enumerate(breaks) if len(indices) >= self.min_cells]
+        if not valid_breaks:
+            return {channel: [] for channel in valid_channels}
+
+        break_lengths = np.fromiter((len(indices) for _, indices in valid_breaks), dtype=int)
+        event_indices = np.concatenate([indices for _, indices in valid_breaks])
+        bin_ids = np.repeat(
+            np.fromiter((idx for idx, _ in valid_breaks), dtype=int),
+            break_lengths,
+        )
+
+        channel_values = {channel: [] for channel in valid_channels}
+        thresholds = np.array([global_thresholds[channel] for channel in valid_channels], dtype=float)
+
+        # Keep memory bounded on wide panels while still aggregating whole event
+        # windows per channel block.
+        max_block_elements = 5_000_000
+        block_size = max(1, min(len(valid_channels), max_block_elements // max(1, len(event_indices))))
+
+        for start in range(0, len(valid_channels), block_size):
+            stop = start + block_size
+            block_channels = valid_channels[start:stop]
+            block_thresholds = thresholds[start:stop]
+            block_data = data[np.ix_(event_indices, block_channels)]
+            positive_mask = block_data > block_thresholds
+
+            if not np.any(positive_mask):
+                continue
+
+            with np.errstate(invalid='ignore', divide='ignore'):
+                log_values = np.log(block_data + 1e-10)
+
+            sum_logs = np.zeros((len(breaks), len(block_channels)), dtype=float)
+            counts = np.zeros((len(breaks), len(block_channels)), dtype=int)
+            positive_rows, positive_cols = np.nonzero(positive_mask)
+            np.add.at(sum_logs, (bin_ids[positive_rows], positive_cols), log_values[positive_rows, positive_cols])
+            np.add.at(counts, (bin_ids[positive_rows], positive_cols), 1)
+
+            with np.errstate(invalid='ignore', divide='ignore'):
+                geomeans = np.exp(sum_logs / counts)
+
+            for block_col, channel in enumerate(block_channels):
+                bins_with_values = np.where(counts[:, block_col] > 0)[0]
+                channel_values[channel].extend(
+                    (int(bin_idx), float(geomeans[bin_idx, block_col]))
+                    for bin_idx in bins_with_values
+                )
+
+        return channel_values
+
     def _process_positive_geomeans(self, data: np.ndarray, fluoro_channels: List[int], 
                                  breaks: List[np.ndarray], marker_names: list,
                                  rejection_count: np.ndarray) -> np.ndarray:
@@ -924,33 +981,12 @@ class MADTimeGate(TimeGateStrategy):
             self.logger.warning("No valid thresholds detected for any channel")
             return rejection_count
         
-        # Dictionary to store geometric means for each channel across all bins
-        channel_geomean_values = {channel: [] for channel in valid_channels}
-        
-        # Calculate geometric means for each bin and channel
-        if self.enable_dask:
-            import dask
-            from dask import delayed
-            
-            # Create delayed tasks for each bin
-            delayed_tasks = [
-                delayed(self._calculate_bin_geomean)(bin_idx, bin_indices, data, valid_channels, global_thresholds)
-                for bin_idx, bin_indices in enumerate(breaks)
-            ]
-            
-            # Compute all tasks in parallel
-            bin_results = dask.compute(*delayed_tasks)
-            
-            # Organize results by channel
-            for bin_idx, bin_geomeans in enumerate(bin_results):
-                for channel, geomean in bin_geomeans.items():
-                    channel_geomean_values[channel].append((bin_idx, geomean))
-        else:
-            # Sequential processing for non-Dask mode
-            for bin_idx, bin_indices in enumerate(breaks):
-                bin_geomeans = self._calculate_bin_geomean(bin_idx, bin_indices, data, valid_channels, global_thresholds)
-                for channel, geomean in bin_geomeans.items():
-                    channel_geomean_values[channel].append((bin_idx, geomean))
+        channel_geomean_values = self._calculate_positive_geomean_values(
+            data,
+            valid_channels,
+            breaks,
+            global_thresholds,
+        )
         
         # Convert lists to structured arrays for MAD analysis
         channel_thresholds = {}

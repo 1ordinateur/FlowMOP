@@ -95,6 +95,176 @@ def test_time_preprocessing_preserves_event_count_when_clipping_saturation(monke
     assert len(processed) == len(channel)
 
 
+def test_vectorized_positive_geomeans_match_loop_aggregation(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    time_gating = importlib.import_module("functions.time_gating")
+
+    gate = time_gating.MADTimeGate(enable_dask=False, min_cells=3)
+    data = np.array(
+        [
+            [0.0, 10.0, 100.0],
+            [1.0, 20.0, 50.0],
+            [2.0, 30.0, 20.0],
+            [3.0, 5.0, 200.0],
+            [4.0, 40.0, 5.0],
+            [5.0, 60.0, 300.0],
+        ],
+        dtype=float,
+    )
+    breaks = [
+        np.array([0, 1, 2]),
+        np.array([2, 3, 4, 5]),
+        np.array([5]),
+    ]
+    valid_channels = [1, 2]
+    thresholds = {1: 15.0, 2: 40.0}
+
+    expected = {channel: [] for channel in valid_channels}
+    for bin_idx, bin_indices in enumerate(breaks):
+        bin_geomeans = gate._calculate_bin_geomean(bin_idx, bin_indices, data, valid_channels, thresholds)
+        for channel, geomean in bin_geomeans.items():
+            expected[channel].append((bin_idx, geomean))
+
+    actual = gate._calculate_positive_geomean_values(data, valid_channels, breaks, thresholds)
+
+    assert actual.keys() == expected.keys()
+    for channel in valid_channels:
+        assert [bin_idx for bin_idx, _ in actual[channel]] == [
+            bin_idx for bin_idx, _ in expected[channel]
+        ]
+        np.testing.assert_allclose(
+            [value for _, value in actual[channel]],
+            [value for _, value in expected[channel]],
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+
+def test_vectorized_positive_geomeans_preserve_empty_bin_behavior(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    time_gating = importlib.import_module("functions.time_gating")
+
+    gate = time_gating.MADTimeGate(enable_dask=False, min_cells=3)
+    data = np.array(
+        [
+            [0.0, 1.0, 100.0],
+            [1.0, 2.0, 90.0],
+            [2.0, 3.0, 80.0],
+            [3.0, 4.0, 70.0],
+        ],
+        dtype=float,
+    )
+    breaks = [
+        np.array([0, 1]),
+        np.array([0, 1, 2]),
+        np.array([1, 2, 3]),
+    ]
+    valid_channels = [1, 2]
+    thresholds = {1: 10.0, 2: 95.0}
+
+    actual = gate._calculate_positive_geomean_values(data, valid_channels, breaks, thresholds)
+
+    assert actual[1] == []
+    assert [bin_idx for bin_idx, _ in actual[2]] == [1]
+    np.testing.assert_allclose([value for _, value in actual[2]], [100.0000000001])
+
+
+def test_removed_bins_deduplicates_overlapping_windows(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    time_gating = importlib.import_module("functions.time_gating")
+
+    gate = time_gating.MADTimeGate(enable_dask=False)
+    breaks = [
+        np.array([0, 1, 2]),
+        np.array([2, 3, 4]),
+        np.array([4, 5]),
+    ]
+
+    removed = gate._removed_bins(breaks, np.array([True, True, False]), 6)
+
+    np.testing.assert_array_equal(removed["cell_ids"], np.array([0, 1, 2, 3, 4]))
+    np.testing.assert_array_equal(removed["cells"], np.array([False, False, False, False, False, True]))
+
+
+def test_positive_geomean_path_matches_loop_integration(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    time_gating = importlib.import_module("functions.time_gating")
+
+    data = np.array(
+        [
+            [0.0, 10.0, 100.0],
+            [1.0, 20.0, 50.0],
+            [2.0, 30.0, 20.0],
+            [3.0, 5.0, 200.0],
+            [4.0, 40.0, 5.0],
+            [5.0, 60.0, 300.0],
+        ],
+        dtype=float,
+    )
+    breaks = [
+        np.array([0, 1, 2]),
+        np.array([2, 3, 4, 5]),
+    ]
+    marker_names = ["Time", "CD3", "CD19"]
+    threshold_frames = {
+        1: np.array([(0, 15.0), (1, 15.0)], dtype=[("Bin", int), ("Threshold", float)]),
+        2: np.array([(0, 40.0), (1, 40.0)], dtype=[("Bin", int), ("Threshold", float)]),
+    }
+
+    def fake_thresholds(_data, _channels, _breaks, _marker_names):
+        return threshold_frames
+
+    def fake_mad(geomean_values, all_breaks, nr_cells, use_dask=None):
+        rejected = np.zeros(nr_cells, dtype=bool)
+        for bin_idx in geomean_values["Bin"][geomean_values["Threshold"] > 100.0]:
+            rejected[all_breaks[int(bin_idx)]] = True
+        return rejected
+
+    new_gate = time_gating.MADTimeGate(enable_dask=False, min_cells=3)
+    monkeypatch.setattr(new_gate, "_determine_thresholds_all_channels", fake_thresholds)
+    monkeypatch.setattr(new_gate, "_apply_mad_analysis", fake_mad)
+    new_rejections = new_gate._process_positive_geomeans(
+        data,
+        [1, 2],
+        breaks,
+        marker_names,
+        np.zeros(data.shape[0], dtype=int),
+    )
+
+    old_gate = time_gating.MADTimeGate(enable_dask=False, min_cells=3)
+    monkeypatch.setattr(old_gate, "_determine_thresholds_all_channels", fake_thresholds)
+    monkeypatch.setattr(old_gate, "_apply_mad_analysis", fake_mad)
+
+    def old_positive_geomeans(gate):
+        threshold_frames_result = gate._determine_thresholds_all_channels(data, [1, 2], breaks, marker_names)
+        global_thresholds = {
+            channel: np.min(thresholds["Threshold"])
+            for channel, thresholds in threshold_frames_result.items()
+            if len(thresholds) > 0
+        }
+        valid_channels = [channel for channel in [1, 2] if channel in global_thresholds]
+        channel_geomean_values = {channel: [] for channel in valid_channels}
+        for bin_idx, bin_indices in enumerate(breaks):
+            bin_geomeans = gate._calculate_bin_geomean(
+                bin_idx,
+                bin_indices,
+                data,
+                valid_channels,
+                global_thresholds,
+            )
+            for channel, geomean in bin_geomeans.items():
+                channel_geomean_values[channel].append((bin_idx, geomean))
+
+        rejection_count = np.zeros(data.shape[0], dtype=int)
+        for channel, values in channel_geomean_values.items():
+            if values:
+                geomean_array = np.array(values, dtype=[("Bin", int), ("Threshold", float)])
+                rejection_count[gate._apply_mad_analysis(geomean_array, breaks, data.shape[0])] += 1
+        return rejection_count
+
+    np.testing.assert_array_equal(new_rejections, old_positive_geomeans(old_gate))
+
+
 def test_fsc_only_debris_bottom_bin_check_does_not_require_ssc(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
     debris_gating = importlib.import_module("functions.debris_gating")
