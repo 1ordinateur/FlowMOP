@@ -42,6 +42,51 @@ def test_synthetic_data_generation_produces_expected_event_and_channel_counts(tm
     assert writes[0]["text_kw_pr"]["SYNTHETIC_EVENTS"] == "123"
 
 
+def test_clone_fcs_to_size_tiles_data_and_preserves_time_density(tmp_path, monkeypatch):
+    fcswrite = types.ModuleType("fcswrite")
+    writes = []
+
+    def fake_write_fcs(**kwargs):
+        writes.append(kwargs)
+
+    fcswrite.write_fcs = fake_write_fcs
+    monkeypatch.setitem(sys.modules, "fcswrite", fcswrite)
+    monkeypatch.setattr(
+        benchmark,
+        "read_fcs_matrix",
+        lambda _path: (
+            np.array(
+                [
+                    [0.0, 10.0, 100.0],
+                    [0.5, 20.0, 200.0],
+                    [1.5, 30.0, 300.0],
+                ],
+                dtype=np.float32,
+            ),
+            ["Time", "FSC-A", "CD3-A"],
+            {"$CYT": "Test"},
+        ),
+    )
+
+    output = tmp_path / "clone.fcs"
+    benchmark.clone_fcs_to_size(Path("base.fcs"), output, events=8)
+
+    assert len(writes) == 1
+    assert writes[0]["filename"] == str(output)
+    assert writes[0]["chn_names"] == ["Time", "FSC-A", "CD3-A"]
+    assert writes[0]["data"].shape == (8, 3)
+    np.testing.assert_allclose(writes[0]["data"][:, 0], [0.0, 0.5, 1.5, 2.25, 2.75, 3.75, 4.5, 5.0])
+    np.testing.assert_allclose(writes[0]["data"][:, 1], [10, 20, 30, 10, 20, 30, 10, 20])
+    assert writes[0]["text_kw_pr"]["CLONED_EVENTS"] == "8"
+    assert writes[0]["text_kw_pr"]["CLONED_TIME_MODE"] == "preserve_density"
+
+
+def test_infer_fluorescence_channel_indices_excludes_time_and_scatter():
+    channels = ["Time", "FSC-A", "SSC-A", "CD3-A", "CD19-A"]
+
+    assert benchmark.infer_fluorescence_channel_indices(channels) == [4, 5]
+
+
 def test_time_verbose_parser_reads_elapsed_rss_and_exit_status():
     sample = """
         Command being timed: "true"
@@ -150,4 +195,49 @@ def test_dry_run_writes_command_plan_without_generating_inputs(tmp_path, monkeyp
     command_plan = (tmp_path / "benchmark_commands.txt").read_text(encoding="utf-8")
     assert "flowmop_exec.py" in command_plan
     assert "--fluor-mode positive_geomeans" in command_plan
+    assert "Rscript" not in command_plan
     assert not (tmp_path / "inputs").exists()
+
+
+def test_dry_run_r_commands_use_one_based_channel_indices(tmp_path, monkeypatch):
+    monkeypatch.setattr(benchmark, "preflight", lambda algorithms, repo_root: {})
+    monkeypatch.setattr(
+        benchmark,
+        "collect_metadata",
+        lambda args, repo_root: {
+            "flowmop_git_commit": "abc123",
+            "python_version": "Python",
+            "r_version": "R",
+            "r_package_versions": {},
+            "cpu_os": "test",
+            "command_line": "benchmark",
+            "random_seed": args.seed,
+            "input_mode": "synthetic",
+            "base_fcs": "",
+        },
+    )
+
+    rc = benchmark.main(
+        [
+            "--dry-run",
+            "--sizes",
+            "1000",
+            "--repeats",
+            "1",
+            "--warmups",
+            "0",
+            "--fluoro-channels",
+            "2",
+            "--algorithms",
+            "peacoqc",
+            "flowcut",
+            "--out-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert rc == 0
+    command_plan = (tmp_path / "benchmark_commands.txt").read_text(encoding="utf-8")
+    assert "run_peacoqc.R" in command_plan
+    assert "run_flowcut.R" in command_plan
+    assert " 6,7" in command_plan

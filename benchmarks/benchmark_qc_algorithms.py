@@ -16,7 +16,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -81,6 +81,20 @@ def channel_names(fluoro_channels: int) -> List[str]:
 
 def fluorescence_channels(fluoro_channels: int) -> List[str]:
     return [f"FL{i}-A" for i in range(1, fluoro_channels + 1)]
+
+
+def fluorescence_channel_indices(fluoro_channels: int) -> List[int]:
+    return list(range(len(BASE_CHANNELS) + 1, len(BASE_CHANNELS) + fluoro_channels + 1))
+
+
+def infer_fluorescence_channel_indices(channel_names: Sequence[str]) -> List[int]:
+    """Return 1-based likely fluorescence channel indices from a real FCS channel list."""
+    excluded_tokens = ("time", "fsc", "ssc")
+    return [
+        index + 1
+        for index, name in enumerate(channel_names)
+        if not any(token in name.lower() for token in excluded_tokens)
+    ]
 
 
 def estimate_raw_matrix_mb(events: int, channels: int, dtype: np.dtype = np.dtype("float32")) -> float:
@@ -176,6 +190,122 @@ def generate_synthetic_fcs(
     return output_path
 
 
+def read_fcs_matrix(input_path: Path) -> Tuple[np.ndarray, List[str], Dict[str, object]]:
+    """Read an FCS file as a numeric matrix, channel names, and metadata."""
+    import readfcs
+
+    adata = readfcs.read(str(input_path))
+    df = adata.to_df()
+    channel_names = list(df.columns)
+
+    var = getattr(adata, "var", None)
+    if var is not None and hasattr(var, "columns") and "marker" in var.columns:
+        markers = [
+            str(marker) if marker is not None and str(marker).strip() else str(var_name)
+            for marker, var_name in zip(adata.var["marker"], adata.var_names)
+        ]
+        if len(markers) == len(channel_names):
+            channel_names = markers
+    elif hasattr(adata, "var_names") and len(adata.var_names) == len(channel_names):
+        channel_names = [str(name) for name in adata.var_names]
+
+    data = df.to_numpy(dtype=np.float32, copy=True)
+    metadata = dict(getattr(adata, "uns", {}).get("meta", {}))
+    return data, channel_names, metadata
+
+
+def find_time_channel(channel_names: Sequence[str]) -> Optional[int]:
+    for index, name in enumerate(channel_names):
+        if str(name).strip().lower() == "time":
+            return index
+    for index, name in enumerate(channel_names):
+        if "time" in str(name).lower():
+            return index
+    return None
+
+
+def cloned_time_values(base_time: np.ndarray, events: int) -> np.ndarray:
+    """Tile base Time values while offsetting each clone block forward."""
+    base = np.asarray(base_time, dtype=np.float64)
+    if base.size == 0:
+        return np.arange(events, dtype=np.float32)
+
+    finite = base[np.isfinite(base)]
+    if finite.size < 2:
+        start = float(finite[0]) if finite.size else 0.0
+        return (start + np.arange(events, dtype=np.float64)).astype(np.float32)
+
+    diffs = np.diff(finite)
+    positive_diffs = diffs[diffs > 0]
+    step = float(np.median(positive_diffs)) if positive_diffs.size else 1.0
+    start = float(finite[0])
+    end = float(finite[-1])
+    block_span = max(end - start + step, step)
+
+    # Preserve the event density pattern inside each original acquisition block,
+    # while ensuring each repeated block starts after the previous one ends.
+    normalized = np.where(np.isfinite(base), base - start, np.arange(base.size, dtype=np.float64) * step)
+    repeats = int(math.ceil(events / base.size))
+    blocks = [
+        normalized + start + block_index * block_span
+        for block_index in range(repeats)
+    ]
+    return np.concatenate(blocks)[:events].astype(np.float32)
+
+
+def clone_fcs_to_size(
+    base_fcs: Path,
+    output_path: Path,
+    events: int,
+) -> Path:
+    """Tile a real FCS file to a requested event count and preserve Time density."""
+    import fcswrite
+
+    if events < 1:
+        raise ValueError("event count must be positive")
+
+    base_data, channel_names, metadata = read_fcs_matrix(base_fcs)
+    if base_data.shape[0] < 1:
+        raise ValueError(f"base FCS contains no events: {base_fcs}")
+
+    repeats = int(math.ceil(events / base_data.shape[0]))
+    cloned = np.tile(base_data, (repeats, 1))[:events].astype(np.float32, copy=False)
+
+    time_index = find_time_channel(channel_names)
+    if time_index is not None:
+        cloned[:, time_index] = cloned_time_values(base_data[:, time_index], events)
+
+    metadata = {
+        str(key): str(value)
+        for key, value in metadata.items()
+        if value is not None
+    }
+    metadata.update(
+        {
+            "$FIL": output_path.name,
+            "CLONED_FROM": str(base_fcs),
+            "CLONED_EVENTS": str(events),
+            "CLONED_BASE_EVENTS": str(base_data.shape[0]),
+            "CLONED_TIME_MODE": "preserve_density" if time_index is not None else "none",
+        }
+    )
+    for index, name in enumerate(channel_names, start=1):
+        metadata[f"$P{index}S"] = name
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fcswrite.write_fcs(
+        filename=str(output_path),
+        chn_names=channel_names,
+        data=cloned,
+        text_kw_pr=metadata,
+        compat_chn_names=True,
+        compat_copy=True,
+        compat_negative=True,
+        compat_percent=True,
+    )
+    return output_path
+
+
 def parse_elapsed_seconds(value: str) -> float:
     parts = value.strip().split(":")
     try:
@@ -207,7 +337,7 @@ def write_r_runner(script_path: Path, algorithm: str) -> Path:
         body = r'''
 args <- commandArgs(trailingOnly = TRUE)
 input_fcs <- args[[1]]
-channels <- strsplit(args[[2]], ",", fixed = TRUE)[[1]]
+channels <- as.integer(strsplit(args[[2]], ",", fixed = TRUE)[[1]])
 ff <- flowCore::read.FCS(input_fcs, transformation = FALSE)
 PeacoQC::PeacoQC(
   ff,
@@ -222,7 +352,7 @@ PeacoQC::PeacoQC(
         body = r'''
 args <- commandArgs(trailingOnly = TRUE)
 input_fcs <- args[[1]]
-channels <- strsplit(args[[2]], ",", fixed = TRUE)[[1]]
+channels <- as.integer(strsplit(args[[2]], ",", fixed = TRUE)[[1]])
 ff <- flowCore::read.FCS(input_fcs, transformation = FALSE)
 flowCut::flowCut(
   ff,
@@ -241,7 +371,7 @@ flowCut::flowCut(
 def build_algorithm_command(
     spec: RunSpec,
     repo_root: Path,
-    fluoro_channels: int,
+    qc_channels: Sequence[int],
     r_runner_dir: Path,
     python_executable: str = "python3",
 ) -> List[str]:
@@ -261,7 +391,7 @@ def build_algorithm_command(
             "Rscript",
             str(runner),
             str(spec.input_fcs),
-            ",".join(fluorescence_channels(fluoro_channels)),
+            ",".join(str(channel) for channel in qc_channels),
         ]
     raise ValueError(f"unsupported algorithm: {spec.algorithm}")
 
@@ -367,11 +497,12 @@ def build_specs(
     algorithms: Sequence[str],
     inputs_dir: Path,
     runs_dir: Path,
+    input_prefix: str = "synthetic",
 ) -> List[RunSpec]:
     specs: List[RunSpec] = []
     for size in sizes:
         for warmup in range(warmups):
-            input_fcs = inputs_dir / f"synthetic_{size}_warmup{warmup + 1}.fcs"
+            input_fcs = inputs_dir / f"{input_prefix}_{size}_warmup{warmup + 1}.fcs"
             for algorithm in algorithms:
                 specs.append(
                     RunSpec(
@@ -384,7 +515,7 @@ def build_specs(
                     )
                 )
         for repeat in range(1, repeats + 1):
-            input_fcs = inputs_dir / f"synthetic_{size}_rep{repeat}.fcs"
+            input_fcs = inputs_dir / f"{input_prefix}_{size}_rep{repeat}.fcs"
             for algorithm in algorithms:
                 specs.append(
                     RunSpec(
@@ -407,26 +538,35 @@ def generate_all_inputs(
     seed: int,
     inject_bad_regions: bool,
     bad_region_fraction: float,
+    base_fcs: Optional[Path] = None,
 ) -> None:
     for size in sizes:
         for ordinal in range(1, warmups + 1):
-            generate_synthetic_fcs(
-                inputs_dir / f"synthetic_{size}_warmup{ordinal}.fcs",
-                size,
-                fluoro_channels,
-                seed + size * 31 + ordinal,
-                inject_bad_regions=inject_bad_regions,
-                bad_region_fraction=bad_region_fraction,
-            )
+            output = inputs_dir / f"{'clone' if base_fcs else 'synthetic'}_{size}_warmup{ordinal}.fcs"
+            if base_fcs:
+                clone_fcs_to_size(base_fcs, output, size)
+            else:
+                generate_synthetic_fcs(
+                    output,
+                    size,
+                    fluoro_channels,
+                    seed + size * 31 + ordinal,
+                    inject_bad_regions=inject_bad_regions,
+                    bad_region_fraction=bad_region_fraction,
+                )
         for repeat in range(1, repeats + 1):
-            generate_synthetic_fcs(
-                inputs_dir / f"synthetic_{size}_rep{repeat}.fcs",
-                size,
-                fluoro_channels,
-                seed + size * 31 + repeat * 10_003,
-                inject_bad_regions=inject_bad_regions,
-                bad_region_fraction=bad_region_fraction,
-            )
+            output = inputs_dir / f"{'clone' if base_fcs else 'synthetic'}_{size}_rep{repeat}.fcs"
+            if base_fcs:
+                clone_fcs_to_size(base_fcs, output, size)
+            else:
+                generate_synthetic_fcs(
+                    output,
+                    size,
+                    fluoro_channels,
+                    seed + size * 31 + repeat * 10_003,
+                    inject_bad_regions=inject_bad_regions,
+                    bad_region_fraction=bad_region_fraction,
+                )
 
 
 def summarize_results(results: Sequence[RunResult], algorithms: Sequence[str], sizes: Sequence[int]) -> List[Dict[str, object]]:
@@ -536,6 +676,8 @@ def render_markdown_summary(
         "cpu_os",
         "command_line",
         "random_seed",
+        "input_mode",
+        "base_fcs",
     ]:
         value = metadata.get(key, "unknown")
         if isinstance(value, dict):
@@ -593,6 +735,8 @@ def collect_metadata(args: argparse.Namespace, repo_root: Path) -> Dict[str, obj
         "cpu_os": f"{platform.platform()} | CPUs={os.cpu_count()} | processor={platform.processor()}",
         "command_line": " ".join(sys.argv),
         "random_seed": args.seed,
+        "input_mode": "clone" if args.base_fcs else "synthetic",
+        "base_fcs": str(args.base_fcs) if args.base_fcs else "",
     }
 
 
@@ -626,6 +770,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Validate commands without generating inputs or running algorithms")
     parser.add_argument("--inject-bad-regions", action="store_true", help="Inject one synthetic anomalous time region")
     parser.add_argument("--bad-region-fraction", type=float, default=0.03)
+    parser.add_argument("--base-fcs", type=Path, help="Clone this real FCS file to each benchmark size instead of generating synthetic data")
     return parser.parse_args(argv)
 
 
@@ -642,7 +787,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.warmups < 0:
         raise SystemExit("--warmups must be non-negative")
 
-    channels = len(channel_names(args.fluoro_channels))
+    if args.base_fcs is not None and not args.base_fcs.exists():
+        raise SystemExit(f"--base-fcs does not exist: {args.base_fcs}")
+
+    if args.base_fcs is not None:
+        base_data, base_channel_names, _ = read_fcs_matrix(args.base_fcs)
+        qc_channels = infer_fluorescence_channel_indices(base_channel_names)
+        channels = len(base_channel_names)
+        if not qc_channels:
+            raise SystemExit(f"No fluorescence channels inferred from --base-fcs: {args.base_fcs}")
+        qc_channel_names = [base_channel_names[index - 1] for index in qc_channels]
+        print(f"Using cloned FCS input from {args.base_fcs}")
+        print(
+            f"Base events: {base_data.shape[0]:,}; channels: {channels}; "
+            f"QC channel indices: {','.join(str(index) for index in qc_channels)}; "
+            f"QC channels: {', '.join(qc_channel_names)}"
+        )
+    else:
+        qc_channels = fluorescence_channel_indices(args.fluoro_channels)
+        channels = len(channel_names(args.fluoro_channels))
+
     print("Estimated raw matrix sizes before FCS writing:")
     for size in args.sizes:
         print(f"  {size:,} events x {channels} channels: {estimate_raw_matrix_mb(size, channels):.1f} MB")
@@ -652,12 +816,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         details = "\n".join(f"  {algorithm}: {reason}" for algorithm, reason in unavailable.items())
         raise SystemExit(f"Missing selected benchmark dependencies:\n{details}\nUse --allow-missing to record them as N/A.")
 
-    specs = build_specs(args.sizes, args.repeats, args.warmups, args.algorithms, inputs_dir, runs_dir)
+    input_prefix = "clone" if args.base_fcs else "synthetic"
+    specs = build_specs(args.sizes, args.repeats, args.warmups, args.algorithms, inputs_dir, runs_dir, input_prefix)
     commands = []
     for spec in specs:
         if spec.algorithm in unavailable:
             continue
-        command = build_algorithm_command(spec, repo_root, args.fluoro_channels, r_runner_dir)
+        command = build_algorithm_command(spec, repo_root, qc_channels, r_runner_dir)
         commands.append(" ".join(command))
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -669,7 +834,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Dry run complete. Wrote command plan to {out_dir / 'benchmark_commands.txt'}")
         return 0
 
-    print("Generating synthetic FCS inputs before timing begins.")
+    print("Generating cloned FCS inputs before timing begins." if args.base_fcs else "Generating synthetic FCS inputs before timing begins.")
     generate_all_inputs(
         args.sizes,
         args.repeats,
@@ -679,6 +844,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.seed,
         args.inject_bad_regions,
         args.bad_region_fraction,
+        base_fcs=args.base_fcs,
     )
 
     results: List[RunResult] = []
@@ -688,7 +854,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 results.append(unavailable_result(spec, unavailable[spec.algorithm]))
             continue
 
-        command = build_algorithm_command(spec, repo_root, args.fluoro_channels, r_runner_dir)
+        command = build_algorithm_command(spec, repo_root, qc_channels, r_runner_dir)
         print(
             f"Running {spec.algorithm} size={spec.size:,} "
             f"{'warmup' if spec.warmup else f'repeat={spec.repeat}'}"
