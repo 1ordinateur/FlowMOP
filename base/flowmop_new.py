@@ -4,15 +4,20 @@ Main integration module that coordinates the gating operations.
 """
 
 import warnings
+import inspect
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Tuple, Dict, Literal, Union, Any, Callable
+from typing import Optional, Tuple, Dict, Literal, Union, Any, Callable, TYPE_CHECKING
 import numpy as np
 
 # Type definitions
-import dask.array as da
-from dask.distributed import Client
-ArrayType = Union[np.ndarray, da.Array]
+if TYPE_CHECKING:
+    import dask.array as da
+    from dask.distributed import Client
+    ArrayType = Union[np.ndarray, da.Array]
+else:
+    Client = Any
+    ArrayType = Any
 DEFAULT_ARRAY_MODULE = np
 
 # Import CPU implementations
@@ -131,8 +136,9 @@ class FlowMOP:
         self.dtype = np.float32
         self.int_dtype = np.int32
 
-        # Strategy internals are NumPy-first. Parallelism is controlled at the
-        # FlowMOP orchestration boundary via GateExecutor.
+        # When Dask is enabled, time gating owns within-file parallelism with
+        # coarse channel blocks. Keep the gate executor off to avoid nested
+        # scheduling and memory contention.
         time_params = {
             'remove_zeros': remove_zeros,
             'min_cells': self.int_dtype(min_cells),
@@ -144,7 +150,7 @@ class FlowMOP:
             'histogram_smoothing': self.int_dtype(smoothing_window*2),
             'mad_smoothing': [float(value) for value in mad_smoothings],
             'mad_method': mad_method,
-            'enable_dask': False,
+            'enable_dask': enable_dask,
             'fluor_mode': fluor_mode,
             'enable_plots': enable_plots,
             'plots_dir': plots_dir
@@ -188,7 +194,7 @@ class FlowMOP:
         self.enable_plots = enable_plots
         self.plots_dir = plots_dir
         self.existing_client = existing_client
-        self.executor = executor or GateExecutor(enabled=enable_dask, max_workers=parallel_workers)
+        self.executor = executor or GateExecutor(enabled=False, max_workers=parallel_workers)
 
     def _process_array(self, data: ArrayType) -> np.ndarray:
         """Process array to ensure it's in the correct format for computations."""
@@ -198,7 +204,7 @@ class FlowMOP:
 
     def _build_context(self, marker_names: list[str], fcs_array: ArrayType) -> FlowMOPContext:
         """Create reusable per-file channel lookup state."""
-        if isinstance(fcs_array, da.Array):
+        if hasattr(fcs_array, "compute"):
             fcs_array = fcs_array.compute()
 
         data = np.asarray(fcs_array)
@@ -282,11 +288,7 @@ class FlowMOP:
         }
 
         if context.time_channel_index is not None and not self.skip_time_removal:
-            tasks['time'] = lambda: self.time_gate.gate(
-                context.data,
-                context.time_channel_index,
-                context.marker_names,
-            )
+            tasks['time'] = lambda: self._run_time_gate_vector_only(context)
 
         if not self.skip_debris_removal:
             tasks['debris'] = lambda: self.debris_gate.gate(context.data, context.marker_names)
@@ -309,6 +311,18 @@ class FlowMOP:
             vectors.doublet = self._process_array(computed['doublet'][1]).astype(self.int_dtype, copy=False)
 
         return vectors
+
+    def _run_time_gate_vector_only(self, context: FlowMOPContext) -> Tuple[Any, ArrayType]:
+        """Run time gating without materializing filtered data when supported."""
+        gate = self.time_gate.gate
+        if "return_filtered_data" in inspect.signature(gate).parameters:
+            return gate(
+                context.data,
+                context.time_channel_index,
+                context.marker_names,
+                return_filtered_data=False,
+            )
+        return gate(context.data, context.time_channel_index, context.marker_names)
 
     def remove_limit_of_detection_events(self, fcs_array: ArrayType, marker_names: list[str]) -> Tuple[ArrayType, ArrayType]:
         """Remove events at the limit of detection."""

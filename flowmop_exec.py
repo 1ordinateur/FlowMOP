@@ -7,25 +7,11 @@ from datetime import datetime
 import importlib
 
 
-def _ensure_dependencies() -> Dict[str, Any]:
-    """
-    Ensure required third-party dependencies are available. If missing, raise
-    with a one-liner for manual installation.
-    """
+def _import_dependencies(module_names: List[str]) -> Dict[str, Any]:
+    """Import dependencies and report any missing modules together."""
     modules: Dict[str, Any] = {}
-    requirements = [
-        'numpy',
-        'pandas',
-        'readfcs',
-        'fcswrite',
-        'scipy',
-        'matplotlib',
-        'dask.array',
-        'dask.distributed',
-    ]
-
     missing: List[str] = []
-    for module_name in requirements:
+    for module_name in module_names:
         try:
             modules[module_name] = importlib.import_module(module_name)
         except ImportError:
@@ -52,19 +38,73 @@ flowmop_new = None
 
 
 def _load_dependencies() -> None:
-    """Load runtime dependencies lazily so CLI help remains available."""
+    """Backward-compatible loader for callers that expect all core globals."""
     global np, pd, readfcs, fcswrite, flowmop_new
-    if np is not None:
+    _load_all_data_dependencies()
+    _load_fcs_writer()
+    _load_flowmop()
+
+
+def _load_data_dependencies() -> None:
+    """Load dependencies needed for reading input data."""
+    _load_numpy()
+    _load_pandas()
+
+
+def _load_pandas() -> None:
+    """Load pandas without requiring FCS-specific readers."""
+    global pd
+    if pd is None:
+        pd = _import_dependencies(["pandas"])["pandas"]
+
+
+def _load_fcs_reader() -> None:
+    """Load the FCS reader only for FCS inputs."""
+    global readfcs
+    if readfcs is None:
+        readfcs = _import_dependencies(["readfcs"])["readfcs"]
+
+
+def _load_all_data_dependencies() -> None:
+    """Load all data dependencies, including the FCS reader."""
+    global np, pd, readfcs
+    missing = [
+        name
+        for name, module in (("numpy", np), ("pandas", pd), ("readfcs", readfcs))
+        if module is None
+    ]
+    if not missing:
         return
 
-    deps = _ensure_dependencies()
-    np = deps['numpy']
-    pd = deps['pandas']
-    readfcs = deps['readfcs']
-    fcswrite = deps['fcswrite']
+    deps = _import_dependencies(missing)
+    if np is None and "numpy" in deps:
+        np = deps["numpy"]
+    if pd is None and "pandas" in deps:
+        pd = deps["pandas"]
+    if readfcs is None and "readfcs" in deps:
+        readfcs = deps["readfcs"]
 
-    from base import flowmop_new as loaded_flowmop_new
-    flowmop_new = loaded_flowmop_new
+
+def _load_numpy() -> None:
+    """Load NumPy without pulling in the full processing stack."""
+    global np
+    if np is None:
+        np = _import_dependencies(["numpy"])["numpy"]
+
+
+def _load_fcs_writer() -> None:
+    """Load the FCS writer only for output-producing code paths."""
+    global fcswrite
+    if fcswrite is None:
+        fcswrite = _import_dependencies(["fcswrite"])["fcswrite"]
+
+
+def _load_flowmop() -> None:
+    """Load FlowMOP processing code only when processing is about to start."""
+    global flowmop_new
+    if flowmop_new is None:
+        from base import flowmop_new as loaded_flowmop_new
+        flowmop_new = loaded_flowmop_new
 
 def _stringify_meta_value(value: Any) -> str:
     """Convert metadata values to strings for FCS writing."""
@@ -188,7 +228,7 @@ def _clean_metadata(
 
 def _ensure_numpy(vector: Any) -> np.ndarray:
     """Convert a vector that may be a Dask array to a NumPy array."""
-    _load_dependencies()
+    _load_numpy()
     if hasattr(vector, "compute"):
         return np.asarray(vector.compute())
     return np.asarray(vector)
@@ -205,7 +245,8 @@ def write_filtered_fcs_files(
     Optionally emit filtered FCS files (subset of events) based on gate columns.
     This is an opt-in pathway and should not be used for the canonical output.
     """
-    _load_dependencies()
+    _load_numpy()
+    _load_fcs_writer()
     filters_to_apply = [
         {'name': 'passfiltered', 'columns': ['passed_final']},
         {'name': 'timepass', 'columns': ['passed_time', 'passed_lod']},
@@ -270,10 +311,11 @@ def load_data(file_path: str) -> Tuple[Dict[str, Any], pd.DataFrame, List[str]]:
     Returns:
         tuple: (meta_raw, data_frame, canonical_channel_names)
     """
-    _load_dependencies()
+    _load_data_dependencies()
     file_path = Path(file_path)
     
     if file_path.suffix.lower() == '.fcs':
+        _load_fcs_reader()
         print(f"Loading FCS file: {file_path}")
 
         try:
@@ -382,6 +424,7 @@ def process_file(
     enable_dask: bool = True,
     export_filtered_fcs: bool = False,
     filtered_output_dir: Optional[str] = None,
+    output_fcs: bool = True,
 ) -> None:
     """
     _load_dependencies()
@@ -411,9 +454,11 @@ def process_file(
         enable_dask: Whether to use within-file gate parallelism
         export_filtered_fcs: If True, also emit filtered/subset FCS files
         filtered_output_dir: Optional directory for filtered FCS (defaults to output_dir or input dir)
+        output_fcs: Whether to emit the annotated FlowMOP FCS output
     """
     # Load data file with complete metadata extraction
     meta_raw, data_df, _canonical_channel_names = load_data(file_path)
+    _load_numpy()
     
     # Filter to keep only numerical columns
     data_df = filter_numerical_columns(data_df)
@@ -433,6 +478,8 @@ def process_file(
     # Set default mad_smoothing if not provided
     if mad_smoothing is None:
         mad_smoothing = DEFAULT_MAD_SMOOTHING.copy()
+
+    _load_flowmop()
     
     # Initialize FlowMOP
     flowmop = flowmop_new.FlowMOP(
@@ -490,9 +537,12 @@ def process_file(
     
     if export_filtered_fcs and not output_dir:
         print("export_filtered_fcs requested but no output_dir provided; skipping filtered outputs.")
+    if export_filtered_fcs and not output_fcs:
+        print("export_filtered_fcs requested but --no-output-fcs was set; skipping filtered outputs.")
     
     # Export results if output directory specified
-    if output_dir:
+    if output_dir and output_fcs:
+        _load_fcs_writer()
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         base_name = Path(file_path).stem
@@ -595,7 +645,9 @@ def main():
                         help='Also emit filtered FCS files (subsetted events) in addition to the annotated output')
     parser.add_argument('--filtered-output-dir', type=str,
                         help='Optional directory for filtered FCS files (defaults to output dir)')
-    parser.set_defaults(remove_zeros=True, enable_dask=True)
+    parser.add_argument('--no-output-fcs', action='store_false', dest='output_fcs',
+                        help='Run processing without writing the annotated FlowMOP FCS output')
+    parser.set_defaults(remove_zeros=True, enable_dask=True, output_fcs=True)
 
     args = parser.parse_args()
     
@@ -605,7 +657,8 @@ def main():
                     args.skip_debris, args.skip_time, args.skip_doublets,
                     args.remove_zeros, args.min_cells, args.max_bins,
                     args.step_val, args.mad_factor, args.enable_dask,
-                    args.export_filtered_fcs, args.filtered_output_dir)
+                    args.export_filtered_fcs, args.filtered_output_dir,
+                    args.output_fcs)
 
 if __name__ == '__main__':
     main()

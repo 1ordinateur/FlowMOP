@@ -83,6 +83,16 @@ def test_gate_executor_runs_independent_tasks(monkeypatch):
     assert result == {"a": 1, "b": 2}
 
 
+def test_flowmop_disables_gate_executor_when_dask_owns_time_parallelism(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    flowmop_new = importlib.import_module("base.flowmop_new")
+
+    flowmop = flowmop_new.FlowMOP(time_channel_index=0, enable_dask=True)
+
+    assert flowmop.executor.enabled is False
+    assert flowmop.time_gate.enable_dask is True
+
+
 def test_time_preprocessing_preserves_event_count_when_clipping_saturation(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
     time_gating = importlib.import_module("functions.time_gating")
@@ -117,6 +127,84 @@ def test_spline_smoothing_zero_factor_disables_smoothing():
     )
 
 
+def _reference_find_peaks(hist: np.ndarray, smoothing_window: int) -> np.ndarray:
+    maxima = (hist >= np.roll(hist, 1)) & (hist >= np.roll(hist, -1))
+    peak_candidates = np.where(maxima)[0]
+
+    if len(peak_candidates) == 0:
+        return peak_candidates
+
+    valid_peaks = []
+    for peak_idx in peak_candidates:
+        window_start = max(0, peak_idx - smoothing_window)
+        window_end = min(len(hist), peak_idx + smoothing_window + 1)
+
+        window_max_idx = window_start + np.argmax(hist[window_start:window_end])
+        if window_max_idx == peak_idx:
+            valid_peaks.append(peak_idx)
+
+    if len(valid_peaks) > 2:
+        prominent_peaks = []
+        for i, peak_idx in enumerate(valid_peaks):
+            peak_height = hist[peak_idx]
+            min_heights = []
+
+            if i > 0:
+                left_peak_idx = valid_peaks[i - 1]
+                min_heights.append(np.min(hist[left_peak_idx:peak_idx]))
+
+            if i < len(valid_peaks) - 1:
+                right_peak_idx = valid_peaks[i + 1]
+                min_heights.append(np.min(hist[peak_idx:right_peak_idx]))
+
+            if min_heights:
+                highest_min = max(min_heights)
+                if peak_height > 0 and peak_height > highest_min:
+                    prominence = (peak_height - highest_min) / peak_height
+                else:
+                    prominence = 0.0
+                if prominence >= 0.1:
+                    prominent_peaks.append(peak_idx)
+            else:
+                prominent_peaks.append(peak_idx)
+
+        return np.array(prominent_peaks)
+
+    return np.array(valid_peaks)
+
+
+def test_find_peaks_matches_reference_edge_cases():
+    flowmop_utils = importlib.import_module("functions.flowmop_utils")
+    cases = [
+        np.array([0.0, 1.0, 0.0]),
+        np.array([1.0, 1.0, 1.0, 0.0]),
+        np.array([0.0, 2.0, 2.0, 1.0, 3.0, 0.0]),
+        np.array([3.0, 0.0, 1.0, 0.0, 3.0]),
+        np.array([0.0, 10.0, 9.5, 0.0, 1.0, 0.0, 10.0]),
+    ]
+
+    for hist in cases:
+        for smoothing_window in (0, 1, 2, 4):
+            np.testing.assert_array_equal(
+                flowmop_utils.find_peaks(hist, smoothing_window),
+                _reference_find_peaks(hist, smoothing_window),
+            )
+
+
+def test_find_peaks_matches_reference_randomized():
+    flowmop_utils = importlib.import_module("functions.flowmop_utils")
+    rng = np.random.default_rng(123)
+
+    for _ in range(200):
+        hist = rng.integers(0, 8, size=100).astype(float)
+        smoothing_window = int(rng.integers(0, 8))
+
+        np.testing.assert_array_equal(
+            flowmop_utils.find_peaks(hist, smoothing_window),
+            _reference_find_peaks(hist, smoothing_window),
+        )
+
+
 def test_vectorized_positive_geomeans_match_loop_aggregation(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
     time_gating = importlib.import_module("functions.time_gating")
@@ -144,6 +232,48 @@ def test_vectorized_positive_geomeans_match_loop_aggregation(monkeypatch):
     expected = {channel: [] for channel in valid_channels}
     for bin_idx, bin_indices in enumerate(breaks):
         bin_geomeans = gate._calculate_bin_geomean(bin_idx, bin_indices, data, valid_channels, thresholds)
+        for channel, geomean in bin_geomeans.items():
+            expected[channel].append((bin_idx, geomean))
+
+    actual = gate._calculate_positive_geomean_values(data, valid_channels, breaks, thresholds)
+
+    assert actual.keys() == expected.keys()
+    for channel in valid_channels:
+        assert [bin_idx for bin_idx, _ in actual[channel]] == [
+            bin_idx for bin_idx, _ in expected[channel]
+        ]
+        np.testing.assert_allclose(
+            [value for _, value in actual[channel]],
+            [value for _, value in expected[channel]],
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+
+def test_range_positive_geomeans_match_loop_aggregation(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    time_gating = importlib.import_module("functions.time_gating")
+
+    gate = time_gating.MADTimeGate(enable_dask=False, min_cells=3)
+    data = np.array(
+        [
+            [0.0, 10.0, 100.0],
+            [1.0, 20.0, 50.0],
+            [2.0, 30.0, 20.0],
+            [3.0, 5.0, 200.0],
+            [4.0, 40.0, 5.0],
+            [5.0, 60.0, 300.0],
+            [6.0, 70.0, 10.0],
+        ],
+        dtype=float,
+    )
+    breaks = [(0, 4), (2, 6), (4, 7), (6, 7)]
+    valid_channels = [1, 2]
+    thresholds = {1: 15.0, 2: 40.0}
+
+    expected = {channel: [] for channel in valid_channels}
+    for bin_idx, bin_ref in enumerate(breaks):
+        bin_geomeans = gate._calculate_bin_geomean(bin_idx, bin_ref, data, valid_channels, thresholds)
         for channel, geomean in bin_geomeans.items():
             expected[channel].append((bin_idx, geomean))
 
@@ -314,6 +444,57 @@ def test_geomean_wrapper_forwards_dask(monkeypatch):
     assert calls[0][1] is True
 
 
+def test_threshold_channel_blocks_are_coarse(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    time_gating = importlib.import_module("functions.time_gating")
+
+    gate = time_gating.MADTimeGate(enable_dask=True)
+
+    assert gate._channel_blocks(list(range(25))) == [
+        [0, 1, 2, 3, 4, 5, 6],
+        [7, 8, 9, 10, 11, 12, 13],
+        [14, 15, 16, 17, 18, 19, 20],
+        [21, 22, 23, 24],
+    ]
+
+
+def test_dask_channel_work_threshold_skips_one_million_event_files(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    time_gating = importlib.import_module("functions.time_gating")
+
+    gate = time_gating.MADTimeGate(enable_dask=True)
+    data = np.ones((1_000_000, 4), dtype=np.float32)
+    breaks = [(0, 2_000)] * 500
+
+    assert gate._should_use_dask_channel_work(data, [1, 2, 3], breaks) is False
+
+
+def test_threshold_block_matches_sequential_channel_loop(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    time_gating = importlib.import_module("functions.time_gating")
+
+    gate = time_gating.MADTimeGate(enable_dask=False)
+    data = np.ones((5, 4), dtype=float)
+    breaks = [(0, 3), (2, 5)]
+    marker_names = ["Time", "CD3", "CD19", "CD4"]
+
+    def fake_thresholds(channel_data, _breaks, marker_name):
+        channel_index = marker_names.index(marker_name)
+        return np.array(
+            [(0, float(channel_index)), (1, float(channel_data.sum()))],
+            dtype=[("Bin", int), ("Threshold", float)],
+        )
+
+    monkeypatch.setattr(gate, "_determine_all_thresholds", fake_thresholds)
+
+    actual = gate._determine_threshold_block(data, [1, 2, 3], breaks, marker_names)
+
+    assert list(actual) == [1, 2, 3]
+    np.testing.assert_array_equal(actual[1]["Threshold"], np.array([1.0, 5.0]))
+    np.testing.assert_array_equal(actual[2]["Threshold"], np.array([2.0, 5.0]))
+    np.testing.assert_array_equal(actual[3]["Threshold"], np.array([3.0, 5.0]))
+
+
 def test_both_mode_requires_two_rejection_contributions(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
     time_gating = importlib.import_module("functions.time_gating")
@@ -338,6 +519,66 @@ def test_both_mode_requires_two_rejection_contributions(monkeypatch):
     )
 
     np.testing.assert_array_equal(time_gate_vector, np.array([True, False, True, True]))
+
+
+def test_time_gate_vector_only_skips_filtered_data_slice(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    time_gating = importlib.import_module("functions.time_gating")
+
+    data = np.ones((4, 3), dtype=float)
+    gate = time_gating.MADTimeGate(enable_dask=False, fluor_mode="both")
+
+    def fake_positive_peaks(_data, _channels, _breaks, _markers, rejection_count):
+        rejection_count[np.array([0, 1])] += 1
+        return rejection_count
+
+    def fake_geomean(_data, _channels, _breaks, rejection_count):
+        rejection_count[np.array([1, 2])] += 1
+        return rejection_count
+
+    monkeypatch.setattr(gate, "_process_positive_peaks", fake_positive_peaks)
+    monkeypatch.setattr(gate, "_process_geometric_mean", fake_geomean)
+
+    filtered_data, default_vector = gate.gate(data, 0, ["Time", "CD3", "CD19"])
+    vector_only_data, vector_only = gate.gate(
+        data,
+        0,
+        ["Time", "CD3", "CD19"],
+        return_filtered_data=False,
+    )
+
+    assert vector_only_data is None
+    np.testing.assert_array_equal(vector_only, default_vector)
+    np.testing.assert_array_equal(filtered_data, data[default_vector])
+
+
+def test_flowmop_requests_vector_only_time_gate_when_supported(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    flowmop_new = importlib.import_module("base.flowmop_new")
+
+    flowmop = flowmop_new.FlowMOP(
+        time_channel_index=0,
+        enable_dask=False,
+        skip_debris=True,
+        skip_doublets=True,
+    )
+    data = np.ones((4, 3), dtype=float)
+    called = {}
+
+    def fake_lod(input_data, marker_names):
+        return input_data, np.ones(input_data.shape[0], dtype=np.int32)
+
+    def fake_time_gate(input_data, time_channel_index, marker_names, return_filtered_data=True):
+        called["return_filtered_data"] = return_filtered_data
+        return None, np.array([True, False, True, True])
+
+    flowmop.remove_limit_of_detection_events = fake_lod
+    flowmop.time_gate.gate = fake_time_gate
+
+    vectors = flowmop.process_fcs_data(["Time", "CD3", "CD19"], data)
+
+    assert called["return_filtered_data"] is False
+    np.testing.assert_array_equal(vectors["time"], np.array([1, 0, 1, 1], dtype=np.int32))
 
 
 def test_positive_geomean_path_matches_loop_integration(monkeypatch):
@@ -585,6 +826,54 @@ def test_fcs_metadata_sanitizes_delimiter_and_writer_managed_fields(monkeypatch)
     assert "$P1B" not in metadata
     assert metadata["$P1S"] == "FSC|Area"
     assert metadata["COMMENT"] == "path |tmp|sample next"
+
+
+def test_process_file_no_output_does_not_import_fcswrite(tmp_path, monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+
+    flowmop_exec = importlib.import_module("flowmop_exec")
+    flowmop_exec = importlib.reload(flowmop_exec)
+
+    data = pd.DataFrame(
+        {
+            "Time": [0.0, 1.0, 2.0],
+            "FSC-A": [10.0, 11.0, 12.0],
+            "CD3": [100.0, 101.0, 102.0],
+        }
+    )
+
+    class FakeFlowMOP:
+        def __init__(self, **kwargs):
+            pass
+
+        def process_fcs_data(self, marker_names, fcs_array):
+            ones = np.ones(fcs_array.shape[0], dtype=np.int32)
+            return {
+                "lod": ones,
+                "debris": ones.copy(),
+                "time": np.array([1, 0, 1], dtype=np.int32),
+                "doublet": ones.copy(),
+                "final": np.array([1, 0, 1], dtype=np.int32),
+            }
+
+    def fake_import_dependencies(module_names):
+        assert "fcswrite" not in module_names
+        return {
+            "numpy": np,
+            "pandas": pd,
+        }
+
+    monkeypatch.setattr(flowmop_exec, "load_data", lambda _path: ({}, data.copy(), list(data.columns)))
+    monkeypatch.setattr(flowmop_exec, "_import_dependencies", fake_import_dependencies)
+    monkeypatch.setattr(flowmop_exec, "flowmop_new", types.SimpleNamespace(FlowMOP=FakeFlowMOP))
+
+    flowmop_exec.process_file(
+        "sample.fcs",
+        output_dir=str(tmp_path),
+        output_fcs=False,
+        skip_debris=True,
+        skip_doublets=True,
+    )
 
 
 def test_flowmop_exec_help_is_import_safe():
