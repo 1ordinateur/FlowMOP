@@ -13,6 +13,7 @@ LIMIT_FILES="${LIMIT_FILES:-}"
 TIMEOUT="${TIMEOUT:-}"
 
 SMOOTHING_GRID=(
+  "0.01,0.05"
   "0.10,1.00"
   "0.10,0.90"
   "0.10,0.80"
@@ -44,7 +45,7 @@ run_dataset() {
     --dataset-bin-size "${bin_size}"
     --dataset-glob "${DATASET_GLOB}"
     --mad-smoothing-grid "${SMOOTHING_GRID[@]}"
-    --baseline-mad-smoothing "0.10,1.00"
+    --baseline-mad-smoothing "0.01,0.05"
     --out-dir "${out_dir}"
   )
 
