@@ -106,8 +106,8 @@ python flowmop_exec.py [files] [options]
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--output-dir` | None | Directory to save output files |
-| `--export-filtered-fcs` | False | Also emit filtered FCS files (subsetted events) |
+| `--output-dir` | None | Directory to save the single annotated FCS output |
+| `--export-filtered-fcs` | False | Optionally emit extra filtered FCS derivatives |
 | `--filtered-output-dir` | output-dir | Directory for filtered FCS files |
 
 ### Filtering Controls
@@ -163,9 +163,15 @@ Output files follow the pattern: `flowmop_<original_name>.fcs`
 
 Example: `sample001.fcs` produces `flowmop_sample001.fcs`
 
-### Added Columns
+### Canonical Annotated FCS
 
-The output FCS file contains all original channels plus gating result columns:
+The canonical FlowMOP output is a single annotated FCS file. It contains all
+original events in their original order, plus appended gating result channels.
+FlowMOP does not remove events from this canonical output.
+
+### Added Channels
+
+The output FCS file contains all original channels plus gating result channels:
 
 | Column | Description |
 |--------|-------------|
@@ -177,7 +183,8 @@ The output FCS file contains all original channels plus gating result columns:
 
 ### Metadata Preservation
 
-FlowMOP preserves all original FCS metadata and adds processing metadata:
+FlowMOP preserves non-structural FCS metadata exposed by the reader and adds
+processing metadata:
 
 - `flowmop_processed`: Processing flag
 - `flowmop_processing_date`: ISO timestamp
@@ -188,9 +195,13 @@ FlowMOP preserves all original FCS metadata and adds processing metadata:
 - `flowmop_retention_percent`: Percentage of events retained
 - Per-filter statistics (`flowmop_<filter>_passed`, `flowmop_<filter>_percent`)
 
+Writer-managed FCS fields are regenerated as needed so the annotated output is
+a valid FCS file with the additional `passed_*` channels.
+
 ### Filtered Outputs (Optional)
 
-When `--export-filtered-fcs` is enabled, additional FCS files containing only events that passed specific filters are created:
+When `--export-filtered-fcs` is enabled, additional derivative FCS files
+containing only events that passed specific filters are created:
 
 | Output Directory | Filter Criteria |
 |------------------|-----------------|
@@ -221,7 +232,10 @@ src/
 
 #### `load_data(file_path) -> (meta_raw, data_frame, channel_names)`
 
-Loads data from FCS or Parquet files. For FCS files, uses `readfcs` to extract data and metadata. Handles channel naming by preferring marker names over channel short names (except for scatter parameters FSC/SSC).
+Loads data from FCS or Parquet files. For FCS files, uses `readfcs` to extract
+data and metadata, with `fcsparser` as a fallback. Handles channel naming by
+preferring marker names over channel short names where available, except for
+FSC/SSC scatter parameters.
 
 #### `process_file(file_path, output_dir, ...)`
 

@@ -289,10 +289,10 @@ def write_filtered_fcs_files(
             text_kw_pr=_prepare_fcs_text_metadata(
                 _ensure_marker_keywords(filtered_meta, output_channel_names)
             ),
-            compat_chn_names=True,
+            compat_chn_names=False,
             compat_copy=True,
-            compat_negative=True,
-            compat_percent=True,
+            compat_negative=False,
+            compat_percent=False,
         )
 
         print(
@@ -596,10 +596,10 @@ def process_file(
             text_kw_pr=_prepare_fcs_text_metadata(
                 _ensure_marker_keywords(complete_metadata, output_channel_names)
             ),
-            compat_chn_names=True,
+            compat_chn_names=False,
             compat_copy=True,
-            compat_negative=True,
-            compat_percent=True
+            compat_negative=False,
+            compat_percent=False
         )
         print(f"Successfully exported data with metadata to: {fcs_output_file}")
         print(f"Metadata fields preserved (after FlowMOP additions): {len(complete_metadata)}")

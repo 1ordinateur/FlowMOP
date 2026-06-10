@@ -828,6 +828,69 @@ def test_fcs_metadata_sanitizes_delimiter_and_writer_managed_fields(monkeypatch)
     assert metadata["COMMENT"] == "path |tmp|sample next"
 
 
+def test_process_file_writes_single_annotated_fcs_with_passed_columns(tmp_path, monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+
+    flowmop_exec = importlib.import_module("flowmop_exec")
+    flowmop_exec = importlib.reload(flowmop_exec)
+    flowmop_exec.np = np
+
+    data = pd.DataFrame(
+        {
+            "FSC-A": [10.0, 11.0, 12.0],
+            "CD3": [100.0, 101.0, 102.0],
+        }
+    )
+
+    class FakeFlowMOP:
+        def __init__(self, **kwargs):
+            pass
+
+        def process_fcs_data(self, marker_names, fcs_array):
+            assert marker_names == ["FSC-A", "CD3"]
+            ones = np.ones(fcs_array.shape[0], dtype=np.int32)
+            return {
+                "lod": ones,
+                "debris": ones.copy(),
+                "time": np.array([1, 0, 1], dtype=np.int32),
+                "doublet": ones.copy(),
+                "final": np.array([1, 0, 1], dtype=np.int32),
+            }
+
+    writes = []
+
+    def fake_write_fcs(**kwargs):
+        writes.append(kwargs)
+
+    monkeypatch.setattr(flowmop_exec, "load_data", lambda _path: ({}, data.copy(), list(data.columns)))
+    monkeypatch.setattr(flowmop_exec, "_load_flowmop", lambda: None)
+    monkeypatch.setattr(flowmop_exec, "_load_fcs_writer", lambda: None)
+    monkeypatch.setattr(flowmop_exec, "flowmop_new", types.SimpleNamespace(FlowMOP=FakeFlowMOP))
+    monkeypatch.setattr(flowmop_exec, "fcswrite", types.SimpleNamespace(write_fcs=fake_write_fcs))
+
+    flowmop_exec.process_file("sample.fcs", output_dir=str(tmp_path))
+
+    assert len(writes) == 1
+    call = writes[0]
+    assert call["filename"].endswith("flowmop_sample.fcs")
+    assert call["chn_names"] == [
+        "FSC-A",
+        "CD3",
+        "passed_lod",
+        "passed_debris",
+        "passed_time",
+        "passed_doublet",
+        "passed_final",
+    ]
+    assert call["data"].shape == (3, 7)
+    np.testing.assert_array_equal(call["data"][:, :2], data.values)
+    np.testing.assert_array_equal(call["data"][:, -1], np.array([1, 0, 1]))
+    assert call["text_kw_pr"]["$P7S"] == "passed_final"
+    assert call["compat_chn_names"] is False
+    assert call["compat_negative"] is False
+    assert call["compat_percent"] is False
+
+
 def test_process_file_no_output_does_not_import_fcswrite(tmp_path, monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
 
