@@ -291,8 +291,11 @@ def apply_spline_smoothing(values: np.ndarray, smoothing_factor: float, n_bins: 
     if len(values) <= 3 or smoothing_factor <= 0:
         return np.asarray(values)
 
-    # Scale smoothing factor based on number of bins.
+    # Scale smoothing factor based on number of bins, retaining the original
+    # bounded range so the effective spline strength is comparable across
+    # files with different numbers of time bins.
     scaled_smoothing = smoothing_factor * n_bins / 100
+    scaled_smoothing = max(0.1, min(2.0, scaled_smoothing))
 
     # Apply spline smoothing
     x_indices = np.arange(len(values))

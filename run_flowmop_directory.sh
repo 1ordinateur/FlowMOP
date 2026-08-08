@@ -33,7 +33,7 @@ OUTPUT_DIR=""
 FILE_PATTERN="*.fcs"
 MAX_PARALLEL=4
 FLUOR_MODE="positive_geomeans"
-MAD_SMOOTHING="0.01 0.05"
+MAD_SMOOTHING="0.1 0.9"
 ENABLE_PLOTS=0
 PLOTS_DIR="time_gate_plots"
 ENABLE_SSC=0
@@ -171,7 +171,7 @@ while [[ $# -gt 0 ]]; do
             echo "Gating options:"
             echo "  --fluor-mode <mode>         Mode for fluorescence analysis (default: positive_geomeans)"
             echo "                              Options: positives, geomean, positive_geomeans, both"
-            echo "  --mad-smoothing <values>    Smoothing factors for MAD-based time gating (default: '0.01 0.05')"
+            echo "  --mad-smoothing <values>    Smoothing factors for MAD-based time gating (default: '0.1 0.9')"
             echo "  --min-cells <num>           Minimum cells required per bin (default: 1000)"
             echo "  --max-bins <num>            Maximum number of bins (default: 600)"
             echo "  --step-val <num>            Step size for binning (default: 200)"

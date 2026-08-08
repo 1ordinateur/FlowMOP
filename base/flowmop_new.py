@@ -127,7 +127,7 @@ class FlowMOP:
             remove_beads: Whether to detect and remove beads based on SSC/FSC characteristics
         """
         if mad_smoothings is None:
-            mad_smoothings = [0.01, 0.05]
+            mad_smoothings = [0.1, 0.9]
 
         if enable_dask:
             self.chunk_size = chunk_size or 10000  # Default chunk size if none provided

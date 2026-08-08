@@ -28,7 +28,7 @@ def _import_dependencies(module_names: List[str]) -> Dict[str, Any]:
     return modules
 
 
-DEFAULT_MAD_SMOOTHING = [0.01, 0.05]
+DEFAULT_MAD_SMOOTHING = [0.1, 0.9]
 
 np = None
 pd = None
@@ -622,7 +622,7 @@ def main():
     parser.add_argument('--fluor-mode', choices=['positives', 'geomean', 'positive_geomeans', 'both'], default='positive_geomeans',
                         help='Mode for fluorescence anomaly detection (default: positive_geomeans)')
     parser.add_argument('--mad-smoothing', type=float, nargs='+', default=DEFAULT_MAD_SMOOTHING.copy(),
-                        help='Smoothing factors for MAD-based time gating (default: 0.01 0.05)')
+                        help='Smoothing factors for MAD-based time gating (default: 0.1 0.9)')
     parser.add_argument('--enable-plots', action='store_true', default=False, help='Generate time gate plots for each channel')
     parser.add_argument('--plots-dir', type=str, default='time_gate_plots', help='Directory to save time gate plots')
     parser.add_argument('--enable-ssc', action='store_true', default=False, help='Use SSC-A for debris gating in addition to FSC-A')

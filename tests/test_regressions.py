@@ -127,6 +127,27 @@ def test_spline_smoothing_zero_factor_disables_smoothing():
     )
 
 
+def test_spline_smoothing_restores_original_scaled_bounds(monkeypatch):
+    flowmop_utils = importlib.import_module("functions.flowmop_utils")
+    scipy_interpolate = importlib.import_module("scipy.interpolate")
+    captured = []
+
+    class RecordingSpline:
+        def __init__(self, x, values, s):
+            captured.append(s)
+
+        def __call__(self, x):
+            return np.asarray(x, dtype=float)
+
+    monkeypatch.setattr(scipy_interpolate, "UnivariateSpline", RecordingSpline)
+    values = np.linspace(0, 1, 8)
+
+    flowmop_utils.apply_spline_smoothing(values, smoothing_factor=0.9, n_bins=600)
+    flowmop_utils.apply_spline_smoothing(values, smoothing_factor=0.01, n_bins=8)
+
+    assert captured == [2.0, 0.1]
+
+
 def _reference_find_peaks(hist: np.ndarray, smoothing_window: int) -> np.ndarray:
     maxima = (hist >= np.roll(hist, 1)) & (hist >= np.roll(hist, -1))
     peak_candidates = np.where(maxima)[0]
