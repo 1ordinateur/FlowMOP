@@ -71,7 +71,7 @@ class FlowMOP:
                  min_cells=150,
                  max_bins=500,
                  step=200,
-                 MAD=6,
+                 MAD=5,
                  mad=5,
                  min_peaks=2,
                  max_peaks=5,

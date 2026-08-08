@@ -61,7 +61,7 @@ class MADTimeGate(TimeGateStrategy):
         enable_plots (bool): Whether to generate diagnostic plots
         plots_dir (str): Directory to save diagnostic plots
     """
-    def __init__(self, remove_zeros=True, min_cells=150, max_bins=500, step=200, mad_threshold=6,
+    def __init__(self, remove_zeros=True, min_cells=150, max_bins=500, step=200, mad_threshold=5,
                  peak_removal=1/3, min_nr_bins_peakdetection=5, histogram_smoothing=5, mad_method='all',
                  mad_smoothing=None, enable_dask=True, fluor_mode='positives', enable_plots=False,
                  plots_dir="time_gate_plots"):

@@ -45,7 +45,7 @@ REMOVE_ZEROS=1
 MIN_CELLS=1000
 MAX_BINS=600
 STEP_VAL=200
-MAD_FACTOR=4
+MAD_FACTOR=5
 SKIP_PROCESSED=1
 DISABLE_DASK=0
 EXPORT_FILTERED=0
@@ -175,7 +175,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --min-cells <num>           Minimum cells required per bin (default: 1000)"
             echo "  --max-bins <num>            Maximum number of bins (default: 600)"
             echo "  --step-val <num>            Step size for binning (default: 200)"
-            echo "  --mad-factor <num>          Factor for MAD calculation (default: 4)"
+            echo "  --mad-factor <num>          Factor for MAD calculation (default: 5)"
             echo ""
             echo "Gate skipping:"
             echo "  --skip-debris               Skip debris filtering"

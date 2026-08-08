@@ -137,7 +137,7 @@ python flowmop_exec.py [files] [options]
 | `--min-cells` | `1000` | Minimum cells required for processing a bin |
 | `--max-bins` | `600` | Maximum number of bins to divide data into |
 | `--step-val` | `200` | Step size for binning |
-| `--mad-factor` | `4` | Factor for MAD calculation for gating |
+| `--mad-factor` | `5` | Factor for MAD calculation for gating |
 
 ### Advanced Options
 

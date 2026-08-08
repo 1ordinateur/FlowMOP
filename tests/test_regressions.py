@@ -148,6 +148,15 @@ def test_spline_smoothing_restores_original_scaled_bounds(monkeypatch):
     assert captured == [2.0, 0.1]
 
 
+def test_flowmop_restores_historical_default_mad_threshold(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    flowmop_new = importlib.import_module("base.flowmop_new")
+
+    flowmop = flowmop_new.FlowMOP(enable_dask=False)
+
+    assert flowmop.time_gate.mad_threshold == 5
+
+
 def _reference_find_peaks(hist: np.ndarray, smoothing_window: int) -> np.ndarray:
     maxima = (hist >= np.roll(hist, 1)) & (hist >= np.roll(hist, -1))
     peak_candidates = np.where(maxima)[0]
