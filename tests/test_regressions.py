@@ -722,6 +722,15 @@ def test_flowmop_mad_smoothing_values_reach_time_gate(monkeypatch):
     assert flowmop.time_gate._get_smoothing_factor("long") == 0.8
 
 
+def test_flowmop_uses_selected_default_mad_smoothing(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    flowmop_new = importlib.import_module("base.flowmop_new")
+
+    flowmop = flowmop_new.FlowMOP(enable_dask=False)
+
+    assert flowmop.time_gate.mad_smoothing == [0.01, 0.05]
+
+
 def test_doublet_gate_passes_through_when_ratios_are_invalid(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
     doublet_gating = importlib.import_module("functions.doublet_gating")

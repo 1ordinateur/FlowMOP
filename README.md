@@ -133,7 +133,7 @@ python flowmop_exec.py [files] [options]
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--mad-smoothing` | `0.1 0.9` | Smoothing factors for MAD-based time gating (space-separated) |
+| `--mad-smoothing` | `0.01 0.05` | Smoothing factors for MAD-based time gating (space-separated) |
 | `--min-cells` | `1000` | Minimum cells required for processing a bin |
 | `--max-bins` | `600` | Maximum number of bins to divide data into |
 | `--step-val` | `200` | Step size for binning |

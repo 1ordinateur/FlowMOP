@@ -74,7 +74,7 @@ class MADTimeGate(TimeGateStrategy):
         self.min_nr_bins_peakdetection = min_nr_bins_peakdetection
         self.histogram_smoothing = histogram_smoothing
         self.mad_method = mad_method
-        self.mad_smoothing = mad_smoothing if mad_smoothing is not None else [0.1, 0.9]
+        self.mad_smoothing = mad_smoothing if mad_smoothing is not None else [0.01, 0.05]
         self.plot_counter = 0
         self.enable_dask = enable_dask
         self.fluor_mode = fluor_mode  # 'positives', 'geomean', 'positive_geomeans', or 'both'
