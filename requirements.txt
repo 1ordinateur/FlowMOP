@@ -5,6 +5,7 @@ matplotlib
 dask
 distributed
 readfcs
+flowio
 fcswrite
 fcsparser
 pyarrow

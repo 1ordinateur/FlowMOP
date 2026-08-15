@@ -794,10 +794,6 @@ def test_output_complete_resolves_passed_columns_as_full_names(tmp_path, monkeyp
 
 
 def test_filtered_writer_uses_numpy_output_arrays(tmp_path, monkeypatch):
-    readfcs = types.ModuleType("readfcs")
-    fcswrite = types.ModuleType("fcswrite")
-    monkeypatch.setitem(sys.modules, "readfcs", readfcs)
-    monkeypatch.setitem(sys.modules, "fcswrite", fcswrite)
     _install_optional_dependency_stubs(monkeypatch)
 
     flowmop_exec = importlib.import_module("flowmop_exec")
@@ -820,10 +816,9 @@ def test_filtered_writer_uses_numpy_output_arrays(tmp_path, monkeypatch):
     writes = []
 
     def fake_write_fcs(**kwargs):
-        kwargs["chn_names"].append("mutated_by_writer")
         writes.append(kwargs)
 
-    monkeypatch.setattr(fcswrite, "write_fcs", fake_write_fcs, raising=False)
+    monkeypatch.setattr(flowmop_exec, "_write_fcs_preserving_parameters", fake_write_fcs)
 
     flowmop_exec.write_filtered_fcs_files(
         tmp_path,
@@ -833,19 +828,18 @@ def test_filtered_writer_uses_numpy_output_arrays(tmp_path, monkeypatch):
         {"tot": "2"},
     )
 
-    assert {call["filename"].split("/")[-2] for call in writes} == {
+    assert {call["filename"].parent.name for call in writes} == {
         "passfiltered",
         "timepass",
         "debrispass",
         "doubletpass",
     }
-    assert all(call["data"].shape[1] == len(output_channel_names) for call in writes)
-    assert all("$P6S" in call["text_kw_pr"] for call in writes)
-    assert all(call["text_kw_pr"]["$P6S"] == "passed_final" for call in writes)
-    assert "mutated_by_writer" not in output_channel_names
+    assert all(call["data"].shape[1] == 1 for call in writes)
+    assert all(call["detector_names"] == ["FSC-A"] for call in writes)
+    assert all(call["marker_names"] == ["FSC-A"] for call in writes)
 
 
-def test_fcs_metadata_sanitizes_delimiter_and_writer_managed_fields(monkeypatch):
+def test_fcs_metadata_preserves_delimiter_and_drops_writer_managed_fields(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
 
     flowmop_exec = importlib.import_module("flowmop_exec")
@@ -863,8 +857,60 @@ def test_fcs_metadata_sanitizes_delimiter_and_writer_managed_fields(monkeypatch)
 
     assert "$TOT" not in metadata
     assert "$P1B" not in metadata
-    assert metadata["$P1S"] == "FSC|Area"
-    assert metadata["COMMENT"] == "path |tmp|sample next"
+    assert "$P1S" not in metadata
+    assert metadata["COMMENT"] == "path /tmp/sample next"
+
+
+def test_fcs_metadata_drops_parsed_spill_matrix(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    flowmop_exec = importlib.import_module("flowmop_exec")
+    flowmop_exec = importlib.reload(flowmop_exec)
+
+    metadata = flowmop_exec._clean_metadata(
+        {
+            "spillover": "1,BV421-A,1",
+            "spill": pd.DataFrame([[1.0]], index=["CCR5"], columns=["CCR5"]),
+        }
+    )
+
+    assert metadata["$SPILLOVER"] == "1,BV421-A,1"
+    assert "$SPILL" not in metadata
+
+
+def test_metadata_preserving_writer_round_trips_parameter_definitions(tmp_path):
+    import readfcs
+
+    flowmop_exec = importlib.import_module("flowmop_exec")
+    flowmop_exec = importlib.reload(flowmop_exec)
+    output_path = tmp_path / "roundtrip.fcs"
+    metadata = {
+        "p1n": "FSC-A",
+        "p1r": "4194304",
+        "p2n": "BV421-A",
+        "p2s": "CCR5",
+        "p2r": "4194304",
+        "spillover": "1,BV421-A,1",
+        "spill": pd.DataFrame([[1.0]], index=["CCR5"], columns=["CCR5"]),
+    }
+
+    flowmop_exec._write_fcs_preserving_parameters(
+        filename=output_path,
+        data=np.array([[10.0, 20.0], [11.0, 21.0]]),
+        detector_names=["FSC-A", "BV421-A"],
+        marker_names=[None, "CCR5"],
+        meta_raw=metadata,
+    )
+
+    output = readfcs.read(str(output_path))
+    output_meta = output.uns["meta"]
+    assert output_meta["p1n"] == "FSC-A"
+    assert output_meta.get("p1s") in (None, "")
+    assert output_meta["p1r"] == "4194304"
+    assert output_meta["p2n"] == "BV421-A"
+    assert output_meta["p2s"] == "CCR5"
+    assert output_meta["p2r"] == "4194304"
+    assert output_meta["spillover"] == "1,BV421-A,1"
+    assert output_meta["spill"].shape == (1, 1)
 
 
 def test_process_file_writes_single_annotated_fcs_with_passed_columns(tmp_path, monkeypatch):
@@ -903,16 +949,15 @@ def test_process_file_writes_single_annotated_fcs_with_passed_columns(tmp_path, 
 
     monkeypatch.setattr(flowmop_exec, "load_data", lambda _path: ({}, data.copy(), list(data.columns)))
     monkeypatch.setattr(flowmop_exec, "_load_flowmop", lambda: None)
-    monkeypatch.setattr(flowmop_exec, "_load_fcs_writer", lambda: None)
     monkeypatch.setattr(flowmop_exec, "flowmop_new", types.SimpleNamespace(FlowMOP=FakeFlowMOP))
-    monkeypatch.setattr(flowmop_exec, "fcswrite", types.SimpleNamespace(write_fcs=fake_write_fcs))
+    monkeypatch.setattr(flowmop_exec, "_write_fcs_preserving_parameters", fake_write_fcs)
 
     flowmop_exec.process_file("sample.fcs", output_dir=str(tmp_path))
 
     assert len(writes) == 1
     call = writes[0]
-    assert call["filename"].endswith("flowmop_sample.fcs")
-    assert call["chn_names"] == [
+    assert call["filename"].name == "flowmop_sample.fcs"
+    assert call["detector_names"] == [
         "FSC-A",
         "CD3",
         "passed_lod",
@@ -921,16 +966,14 @@ def test_process_file_writes_single_annotated_fcs_with_passed_columns(tmp_path, 
         "passed_doublet",
         "passed_final",
     ]
+    assert call["marker_names"] == call["detector_names"]
     assert call["data"].shape == (3, 7)
     np.testing.assert_array_equal(call["data"][:, :2], data.values)
     np.testing.assert_array_equal(call["data"][:, -1], np.array([1, 0, 1]))
-    assert call["text_kw_pr"]["$P7S"] == "passed_final"
-    assert call["compat_chn_names"] is False
-    assert call["compat_negative"] is False
-    assert call["compat_percent"] is False
+    assert call["original_parameter_count"] == 2
 
 
-def test_process_file_no_output_does_not_import_fcswrite(tmp_path, monkeypatch):
+def test_process_file_no_output_does_not_import_fcs_writer(tmp_path, monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
 
     flowmop_exec = importlib.import_module("flowmop_exec")
@@ -959,6 +1002,7 @@ def test_process_file_no_output_does_not_import_fcswrite(tmp_path, monkeypatch):
             }
 
     def fake_import_dependencies(module_names):
+        assert "flowio" not in module_names
         assert "fcswrite" not in module_names
         return {
             "numpy": np,

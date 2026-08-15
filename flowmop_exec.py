@@ -18,7 +18,7 @@ def _import_dependencies(module_names: List[str]) -> Dict[str, Any]:
             missing.append(module_name)
 
     if missing:
-        install_cmd = "pip install numpy pandas scipy matplotlib dask distributed readfcs fcswrite"
+        install_cmd = "pip install numpy pandas scipy matplotlib dask distributed readfcs flowio fcswrite"
         raise ImportError(
             "Missing dependencies: "
             f"{', '.join(missing)}. "
@@ -33,13 +33,13 @@ DEFAULT_MAD_SMOOTHING = [0.01, 0.05]
 np = None
 pd = None
 readfcs = None
-fcswrite = None
+flowio = None
 flowmop_new = None
 
 
 def _load_dependencies() -> None:
     """Backward-compatible loader for callers that expect all core globals."""
-    global np, pd, readfcs, fcswrite, flowmop_new
+    global np, pd, readfcs, flowio, flowmop_new
     _load_all_data_dependencies()
     _load_fcs_writer()
     _load_flowmop()
@@ -93,10 +93,10 @@ def _load_numpy() -> None:
 
 
 def _load_fcs_writer() -> None:
-    """Load the FCS writer only for output-producing code paths."""
-    global fcswrite
-    if fcswrite is None:
-        fcswrite = _import_dependencies(["fcswrite"])["fcswrite"]
+    """Load the metadata-aware FCS writer only for output-producing paths."""
+    global flowio
+    if flowio is None:
+        flowio = _import_dependencies(["flowio"])["flowio"]
 
 
 def _load_flowmop() -> None:
@@ -110,25 +110,56 @@ def _stringify_meta_value(value: Any) -> str:
     """Convert metadata values to strings for FCS writing."""
     if isinstance(value, (list, tuple)):
         value = ','.join(str(v) for v in value)
-    return str(value).replace('/', '|').replace('\r', ' ').replace('\n', ' ')
+    return str(value).replace('\r', ' ').replace('\n', ' ')
 
 
 def _prepare_fcs_text_metadata(metadata: Dict[str, Any]) -> Dict[str, str]:
-    """Sanitize metadata for fcswrite's slash-delimited TEXT segment."""
+    """Convert FCS metadata to text; FlowIO escapes delimiters when writing."""
     return {
-        str(key).replace('/', '|').replace('\r', ' ').replace('\n', ' '): (
+        str(key).replace('\r', ' ').replace('\n', ' '): (
             _stringify_meta_value(value)
         )
         for key, value in metadata.items()
     }
 
 
-def _ensure_marker_keywords(metadata: Dict[str, Any], channel_names: List[str]) -> Dict[str, Any]:
-    """Ensure $PnS marker keywords exist for readers that require them."""
-    metadata = metadata.copy()
-    for index, channel_name in enumerate(channel_names, start=1):
-        metadata.setdefault(f'$P{index}S', channel_name)
-    return metadata
+def _metadata_value(metadata: Dict[str, Any], keyword: str) -> Any:
+    """Return a metadata value using case- and dollar-insensitive matching."""
+    normalized_keyword = keyword.lower().lstrip('$')
+    for key, value in metadata.items():
+        if str(key).lower().lstrip('$') == normalized_keyword:
+            return value
+    return None
+
+
+def _parameter_labels(
+    metadata: Dict[str, Any],
+    processing_channel_names: List[str],
+) -> Tuple[List[str], List[Optional[str]]]:
+    """Recover original detector ($PnN) and marker ($PnS) labels in data order."""
+    detector_names: List[str] = []
+    marker_names: List[Optional[str]] = []
+    for index, processing_name in enumerate(processing_channel_names, start=1):
+        detector = _metadata_value(metadata, f'p{index}n')
+        marker = _metadata_value(metadata, f'p{index}s')
+        detector_names.append(str(detector) if detector not in (None, '') else processing_name)
+        if marker not in (None, ''):
+            marker_names.append(str(marker))
+        elif detector in (None, ''):
+            # Parquet and synthetic inputs do not have an original $PnS field.
+            marker_names.append(processing_name)
+        else:
+            # Preserve an absent $PnS for scatter/time channels in an input FCS.
+            marker_names.append(None)
+    return detector_names, marker_names
+
+
+def _valid_spillover_text(value: Any) -> bool:
+    """Return whether a value looks like a serialized FCS spillover matrix."""
+    if not isinstance(value, str):
+        return False
+    first_field = value.split(',', 1)[0].strip()
+    return first_field.isdigit() and int(first_field) > 0
 
 
 def _clean_metadata(
@@ -137,7 +168,7 @@ def _clean_metadata(
 ) -> Dict[str, str]:
     """
     Build a metadata dict for output, preserving all original metadata except
-    structural byte offsets (fcswrite recalculates) and $PAR (changes when
+    structural byte offsets (FlowIO recalculates) and $PAR (changes when
     columns are added).
 
     Handles both fcsparser-style keys ($KEY) and readfcs-style keys (lowercase, no $).
@@ -146,11 +177,11 @@ def _clean_metadata(
 
     Args:
         meta_raw: Raw metadata dictionary from readfcs or fcsparser
-        set_total_events: Deprecated compatibility argument. fcswrite sets $TOT
+        set_total_events: Deprecated compatibility argument. FlowIO sets $TOT
             from the written data shape.
 
     Returns:
-        Cleaned metadata dict ready for fcswrite
+        Cleaned metadata dict ready for FlowIO
     """
     # FCS 3.0/3.1 standard keywords that should have $ prefix (lowercase, without $)
     fcs_standard_keywords = {
@@ -165,7 +196,7 @@ def _clean_metadata(
         'spill', 'spillover',
     }
 
-    # Structural byte offsets - must be stripped (fcswrite recalculates these)
+    # Structural byte offsets - must be stripped (FlowIO recalculates these)
     structural_to_strip = {
         'begindata', 'enddata', 'begintext', 'endtext',
         'beginanalysis', 'endanalysis', 'beginstext', 'endstext', 'nextdata',
@@ -173,7 +204,15 @@ def _clean_metadata(
     writer_managed_to_strip = {
         'byteord', 'datatype', 'mode', 'tot', 'par',
     }
-    parameter_suffixes_to_strip = {'b', 'e', 'n', 'r', 'd'}
+    # FlowIO owns these definitions. $PnR/$PnG and optional parameter metadata
+    # remain available so the writer can reproduce the input parameter table.
+    parameter_suffixes_to_strip = {'b', 'e', 'n', 's'}
+
+    has_serialized_spillover = any(
+        str(key).lower().lstrip('$') == 'spillover'
+        and _valid_spillover_text(value)
+        for key, value in meta_raw.items()
+    )
 
     cleaned: Dict[str, str] = {}
     for key, value in meta_raw.items():
@@ -183,15 +222,22 @@ def _clean_metadata(
         key_str = str(key)
         key_normalized = key_str.lower().lstrip('$')
 
+        # readfcs exposes both the serialized spillover keyword and a parsed
+        # pandas matrix named "spill". Only serialized text belongs in FCS.
+        if key_normalized == 'spill' and (
+            has_serialized_spillover or not _valid_spillover_text(value)
+        ):
+            continue
+
         # Skip internal/helper keys
         if key_str.startswith('_'):
             continue
 
-        # Skip structural/writer-owned fields (fcswrite recalculates them)
+        # Skip structural/writer-owned fields (FlowIO recalculates them)
         if key_normalized in structural_to_strip or key_normalized in writer_managed_to_strip:
             continue
 
-        # Skip parameter fields owned by fcswrite. Other parameter metadata
+        # Skip parameter fields owned by FlowIO. Other parameter metadata
         # such as $PnS/$PnG/$PnV can still be preserved for original channels.
         if (
             len(key_normalized) >= 3
@@ -226,6 +272,42 @@ def _clean_metadata(
     return _prepare_fcs_text_metadata(cleaned)
 
 
+def _write_fcs_preserving_parameters(
+    filename: Path,
+    data: np.ndarray,
+    detector_names: List[str],
+    marker_names: List[Optional[str]],
+    meta_raw: Dict[str, Any],
+    added_metadata: Optional[Dict[str, Any]] = None,
+    original_parameter_count: Optional[int] = None,
+) -> None:
+    """Write an FCS while preserving the input parameter metadata semantics."""
+    _load_numpy()
+    _load_fcs_writer()
+    metadata = _clean_metadata(meta_raw=meta_raw)
+    if added_metadata:
+        metadata.update(_prepare_fcs_text_metadata(added_metadata))
+
+    original_count = (
+        len(detector_names) if original_parameter_count is None
+        else original_parameter_count
+    )
+    for index in range(original_count + 1, len(detector_names) + 1):
+        metadata[f'$P{index}R'] = '1'
+        metadata[f'$P{index}G'] = '1.0'
+
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    event_data = np.asarray(data, dtype=np.float32).reshape(-1)
+    with filename.open('wb') as output_handle:
+        flowio.create_fcs(
+            output_handle,
+            event_data,
+            detector_names,
+            opt_channel_names=marker_names,
+            metadata_dict=metadata,
+        )
+
+
 def _ensure_numpy(vector: Any) -> np.ndarray:
     """Convert a vector that may be a Dask array to a NumPy array."""
     _load_numpy()
@@ -240,13 +322,26 @@ def write_filtered_fcs_files(
     output_data: np.ndarray,
     output_channel_names: List[str],
     meta_raw: Dict[str, Any],
+    original_detector_names: Optional[List[str]] = None,
+    original_marker_names: Optional[List[Optional[str]]] = None,
 ) -> None:
     """
     Optionally emit filtered FCS files (subset of events) based on gate columns.
     This is an opt-in pathway and should not be used for the canonical output.
     """
     _load_numpy()
-    _load_fcs_writer()
+    original_parameter_count = next(
+        (
+            index for index, name in enumerate(output_channel_names)
+            if name.startswith('passed_')
+        ),
+        len(output_channel_names),
+    )
+    if original_detector_names is None or original_marker_names is None:
+        original_detector_names, original_marker_names = _parameter_labels(
+            meta_raw,
+            output_channel_names[:original_parameter_count],
+        )
     filters_to_apply = [
         {'name': 'passfiltered', 'columns': ['passed_final']},
         {'name': 'timepass', 'columns': ['passed_time', 'passed_lod']},
@@ -268,7 +363,9 @@ def write_filtered_fcs_files(
         for col in required_cols:
             mask &= output_data[:, column_index[col]] > 0
 
-        filtered_data = output_data[mask]
+        # Benchmarking derivatives are true cleaned FCS files: retain only the
+        # original biological parameters, not FlowMOP's annotation columns.
+        filtered_data = output_data[mask, :original_parameter_count]
         if filtered_data.size == 0:
             print(f"Filter {filter_def['name']}: no events passed for {base_name}, skipping.")
             continue
@@ -277,22 +374,17 @@ def write_filtered_fcs_files(
         filter_output_path.mkdir(parents=True, exist_ok=True)
         output_file_path = filter_output_path / f"{base_name}.fcs"
 
-        filtered_meta = _clean_metadata(meta_raw=meta_raw)
-        filtered_meta['flowmop_filtered'] = 'true'
-        filtered_meta['flowmop_filtered_type'] = filter_def['name']
-        filtered_meta['flowmop_filtered_source'] = f"flowmop_{base_name}.fcs"
-
-        fcswrite.write_fcs(
-            filename=str(output_file_path),
-            chn_names=output_channel_names.copy(),
+        _write_fcs_preserving_parameters(
+            filename=output_file_path,
             data=filtered_data,
-            text_kw_pr=_prepare_fcs_text_metadata(
-                _ensure_marker_keywords(filtered_meta, output_channel_names)
-            ),
-            compat_chn_names=False,
-            compat_copy=True,
-            compat_negative=False,
-            compat_percent=False,
+            detector_names=original_detector_names,
+            marker_names=original_marker_names,
+            meta_raw=meta_raw,
+            added_metadata={
+                'flowmop_filtered': 'true',
+                'flowmop_filtered_type': filter_def['name'],
+                'flowmop_filtered_source': f"flowmop_{base_name}.fcs",
+            },
         )
 
         print(
@@ -467,6 +559,10 @@ def process_file(
     # Convert data to numpy array and get channel names
     fcs_array = data_df.values
     marker_names = list(data_df.columns)
+    original_detector_names, original_marker_names = _parameter_labels(
+        meta_raw,
+        marker_names,
+    )
     
     # Find Time channel index if it exists
     time_channel_index = None
@@ -563,46 +659,47 @@ def process_file(
 
         output_data = np.column_stack(output_columns)
         
-        # Prepare metadata: preserve all original metadata, only strip structural offsets and $PAR
-        complete_metadata = _clean_metadata(meta_raw=meta_raw)
-
-        # Add FlowMOP processing metadata
-        complete_metadata['flowmop_output_filename'] = str(fcs_output_file)
-        complete_metadata['flowmop_processed'] = 'true'
-        complete_metadata['flowmop_processing_date'] = datetime.now().isoformat()
-        complete_metadata['flowmop_original_file'] = str(file_path)
-        complete_metadata['flowmop_fluor_mode'] = fluor_mode
-        complete_metadata['flowmop_mad_smoothing'] = str(mad_smoothing)
-        complete_metadata['flowmop_min_cells'] = str(min_cells)
-        complete_metadata['flowmop_max_bins'] = str(max_bins)
-        complete_metadata['flowmop_step_val'] = str(step_val)
-        complete_metadata['flowmop_mad_factor'] = str(mad_factor)
-        complete_metadata['flowmop_events_original'] = str(len(fcs_array))
-        complete_metadata['flowmop_events_final'] = str(passed_count)
-        complete_metadata['flowmop_retention_percent'] = f"{(passed_count/len(fcs_array)*100):.2f}"
+        # Add FlowMOP processing metadata without modifying input parameters.
+        processing_metadata = {
+            'flowmop_output_filename': str(fcs_output_file),
+            'flowmop_processed': 'true',
+            'flowmop_processing_date': datetime.now().isoformat(),
+            'flowmop_original_file': str(file_path),
+            'flowmop_fluor_mode': fluor_mode,
+            'flowmop_mad_smoothing': str(mad_smoothing),
+            'flowmop_min_cells': str(min_cells),
+            'flowmop_max_bins': str(max_bins),
+            'flowmop_step_val': str(step_val),
+            'flowmop_mad_factor': str(mad_factor),
+            'flowmop_events_original': str(len(fcs_array)),
+            'flowmop_events_final': str(passed_count),
+            'flowmop_retention_percent': f"{(passed_count/len(fcs_array)*100):.2f}",
+        }
         
         # Add filter statistics
         for name, vector in vectors.items():
-            complete_metadata[f'flowmop_{name}_passed'] = str(int((vector == 1).sum()))
-            complete_metadata[f'flowmop_{name}_percent'] = f"{(int((vector == 1).sum())/len(fcs_array)*100):.2f}"
+            processing_metadata[f'flowmop_{name}_passed'] = str(int((vector == 1).sum()))
+            processing_metadata[f'flowmop_{name}_percent'] = f"{(int((vector == 1).sum())/len(fcs_array)*100):.2f}"
         
         # Write to FCS file with metadata preservation
         print(f"Exporting to FCS file: {fcs_output_file}")
-        print(f"Preserving {len(complete_metadata)} metadata fields (excluding structural channel defs)")
-        fcswrite.write_fcs(
-            filename=str(fcs_output_file),
-            chn_names=output_channel_names.copy(),
+        annotated_detector_names = original_detector_names + [
+            name for name in output_channel_names[len(original_detector_names):]
+        ]
+        annotated_marker_names = original_marker_names + [
+            name for name in output_channel_names[len(original_marker_names):]
+        ]
+        _write_fcs_preserving_parameters(
+            filename=fcs_output_file,
             data=output_data,
-            text_kw_pr=_prepare_fcs_text_metadata(
-                _ensure_marker_keywords(complete_metadata, output_channel_names)
-            ),
-            compat_chn_names=False,
-            compat_copy=True,
-            compat_negative=False,
-            compat_percent=False
+            detector_names=annotated_detector_names,
+            marker_names=annotated_marker_names,
+            meta_raw=meta_raw,
+            added_metadata=processing_metadata,
+            original_parameter_count=len(original_detector_names),
         )
         print(f"Successfully exported data with metadata to: {fcs_output_file}")
-        print(f"Metadata fields preserved (after FlowMOP additions): {len(complete_metadata)}")
+        print(f"Added {len(processing_metadata)} FlowMOP metadata fields")
 
         # Optionally emit filtered/subset FCS files
         if export_filtered_fcs:
@@ -613,6 +710,8 @@ def process_file(
                 output_data=output_data,
                 output_channel_names=output_channel_names,
                 meta_raw=meta_raw,
+                original_detector_names=original_detector_names,
+                original_marker_names=original_marker_names,
             )
 
 def main():

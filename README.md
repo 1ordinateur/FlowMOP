@@ -183,8 +183,11 @@ The output FCS file contains all original channels plus gating result channels:
 
 ### Metadata Preservation
 
-FlowMOP preserves non-structural FCS metadata exposed by the reader and adds
-processing metadata:
+FlowMOP preserves non-structural FCS metadata exposed by the reader, including
+the original detector names (`$PnN`), marker labels (`$PnS`), parameter ranges,
+and serialized spillover matrix. Protein labels are used internally for
+processing without replacing detector names in exported files. FlowMOP also
+adds processing metadata:
 
 - `flowmop_processed`: Processing flag
 - `flowmop_processing_date`: ISO timestamp
@@ -195,13 +198,16 @@ processing metadata:
 - `flowmop_retention_percent`: Percentage of events retained
 - Per-filter statistics (`flowmop_<filter>_passed`, `flowmop_<filter>_percent`)
 
-Writer-managed FCS fields are regenerated as needed so the annotated output is
-a valid FCS file with the additional `passed_*` channels.
+Structural fields such as byte offsets are regenerated as needed. The annotated
+output adds the `passed_*` channels after the original parameter table; the
+metadata of the original parameters is unchanged.
 
 ### Filtered Outputs (Optional)
 
 When `--export-filtered-fcs` is enabled, additional derivative FCS files
-containing only events that passed specific filters are created:
+containing only events that passed specific filters are created. These files
+contain only the original input parameters, so they can be compared directly
+with cleaned outputs from other quality-control tools:
 
 | Output Directory | Filter Criteria |
 |------------------|-----------------|
