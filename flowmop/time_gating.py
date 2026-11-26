@@ -318,7 +318,7 @@ class MADTimeGate(TimeGateStrategy):
         # Define a function to calculate geometric mean for a single bin
         def calculate_bin_geomean(break_idx, break_indices, data, channels):
             # Get fluorescence values for all channels in this time bin
-            bin_data = data[break_indices][:, channels]
+            bin_data = self._take_bin(data, break_indices)[:, channels]
 
             # Handle zeros and negative values for geometric mean calculation
             # Add small epsilon to avoid zeros, and take absolute value to handle negatives
