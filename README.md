@@ -1,177 +1,110 @@
 # FlowMOP - Flow Cytometry Multi-Operation Pipeline
 
-A command-line tool for automated quality control of flow cytometry data. FlowMOP processes FCS and Parquet files through a gating pipeline that removes debris, doublets, and time-based anomalies.
+FlowMOP does automated quality control of flow cytometry data. It applies three gates to FCS and Parquet files:
 
-## Table of Contents
+- a **time gate**, which removes time bins with unusual fluorescence (for example, from air bubbles or blockages);
+- a **debris gate**, which removes small, low-FSC events;
+- a **doublet gate**, which removes events that are two or more cells.
 
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Batch Processing](#batch-processing)
-- [Usage](#usage)
-- [CLI Arguments](#cli-arguments)
-- [Output Files](#output-files)
-- [Architecture](#architecture)
-- [Notes](#notes)
-- [Related Scripts](#related-scripts)
+FlowMOP does not delete events. Each output FCS file keeps all events in their original order and adds `passed_*` columns (1 = passed, 0 = failed), so that you can gate on them in your usual software.
 
-## Installation
+## Contents
 
-### Dependencies
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Output](#output)
+- [Options](#options)
+- [Use FlowMOP from Python](#use-flowmop-from-python)
+- [Old batch script](#old-batch-script)
+- [Problems and solutions](#problems-and-solutions)
+- [For developers](#for-developers)
 
-FlowMOP requires the following Python packages:
+## Install
 
-| Package | Purpose |
-|---------|---------|
-| `numpy` | Numerical operations |
-| `pandas` | Data manipulation |
-| `readfcs` | FCS file reading |
-| `fcswrite` | FCS file writing |
-| `scipy` | Histogram smoothing, interpolation, and statistics |
-| `matplotlib` | Diagnostic plot generation |
-| `dask` | Parallel array operations |
-| `distributed` | Dask distributed scheduler |
-| `fcsparser` | Optional fallback FCS reader |
-| `pyarrow` | Parquet file support through pandas |
+You need Python 3.9 or later.
 
-**Note:** `distributed` is installed separately from `dask`.
+1. Optional but recommended: make a separate Python environment for FlowMOP.
 
-### Install Command
+   ```bash
+   # with conda
+   conda create -n flowmop python=3.12
+   conda activate flowmop
 
-```bash
-pip install -r requirements.txt
-```
+   # or with venv (Linux and macOS)
+   python3 -m venv flowmop-env
+   source flowmop-env/bin/activate
 
-## Quick Start
+   # or with venv (Windows PowerShell)
+   py -m venv flowmop-env
+   flowmop-env\Scripts\Activate.ps1
+   ```
 
-Process a single FCS file:
+2. Install FlowMOP and its dependencies with one command:
 
-```bash
-python flowmop_exec.py sample.fcs --output-dir ./output
-```
+   ```bash
+   pip install git+https://github.com/1ordinateur/FlowMOP.git
+   ```
 
-For batch processing of multiple files, see [Batch Processing](#batch-processing) below.
+   If you have a copy of the FlowMOP folder, run `pip install .` in that folder.
 
-## Batch Processing
+3. Make sure that the install is correct:
 
-For processing multiple files in parallel, use `run_flowmop_directory.sh`:
+   ```bash
+   flowmop --version
+   ```
 
-```bash
-./run_flowmop_directory.sh --input-dir ./fcs_files --output-dir ./output
-```
+## Quick start
 
-### Batch Processing Arguments
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--input-dir` | required | Directory containing input FCS/Parquet files |
-| `--output-dir` | required | Directory for output files |
-| `--file-pattern` | `*.fcs` | Glob pattern to match files |
-| `--max-parallel` | `4` | Number of parallel workers |
-| `--no-skip-processed` | false | Reprocess files that already have output |
-| `--dry-run` | false | List files that would be processed without running |
-| `--verbose` | false | Show detailed output |
-
-All FlowMOP options (`--fluor-mode`, `--mad-smoothing`, etc.) are passed through to `flowmop_exec.py`.
-
-### Example
+Process one file:
 
 ```bash
-./run_flowmop_directory.sh \
-    --input-dir ./data \
-    --output-dir ./output \
-    --max-parallel 8 \
-    --fluor-mode positive_geomeans \
-    --mad-factor 5
+flowmop sample.fcs --output-dir results
 ```
 
-### Requirements
-
-- **GNU Parallel** must be installed (`apt install parallel` or `brew install parallel`)
-
-## Usage
+Process all FCS and Parquet files in a folder and its subfolders, with 4 files at the same time:
 
 ```bash
-python flowmop_exec.py [files] [options]
+flowmop ./fcs_files --output-dir results --jobs 4
 ```
 
-## CLI Arguments
+The screen shows one line for each file:
 
-### Required Arguments
+```text
+FlowMOP 0.2.0: 3 file(s), 3 job(s), output in results
+[1/3] 12A.fcs  253,728 events  83.0% kept  10.6 s
+[2/3] 11B.fcs  258,952 events  34.0% kept  11.1 s
+[3/3] 10A.fcs  463,512 events  66.9% kept  14.7 s
+Done: 3 of 3 file(s) processed. Summary: results/flowmop_summary.csv  Logs: results/logs
+```
 
-| Argument | Description |
-|----------|-------------|
-| `files` | One or more paths to data files (FCS or Parquet format) |
+More examples:
 
-### Output Options
+```bash
+flowmop ./fcs_files -o results --dry-run                 # list the files, process nothing
+flowmop ./fcs_files -o results --skip-existing           # continue a run that stopped
+flowmop ./fcs_files -o results --file-pattern '*_stained.fcs'
+flowmop sample.fcs -o results --skip-debris --skip-doublets   # time gate only
+flowmop sample.fcs -o results --enable-plots             # also write time gate plots
+```
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--output-dir` | None | Directory to save the single annotated FCS output |
-| `--export-filtered-fcs` | False | Optionally emit extra filtered FCS derivatives |
-| `--filtered-output-dir` | output-dir | Directory for filtered FCS files |
+If you do not give `--output-dir`, FlowMOP writes to `./flowmop_output`. FlowMOP never changes or renames the input files.
 
-### Filtering Controls
+## Output
 
-| Argument | Description |
-|----------|-------------|
-| `--skip-debris` | Skip debris filtering |
-| `--skip-time` | Skip time filtering |
-| `--skip-doublets` | Skip doublet filtering |
+```text
+results/
+├── flowmop_sample1.fcs      # all events + passed_* columns
+├── flowmop_sample2.fcs
+├── flowmop_summary.csv      # one row for each input file
+├── logs/
+│   ├── sample1.log          # full processing detail and warnings
+│   └── sample2.log
+└── plots/sample1/           # only with --enable-plots
+```
 
-### Fluorescence Mode
+### Annotated FCS files
 
-| Argument | Default | Options |
-|----------|---------|---------|
-| `--fluor-mode` | `positive_geomeans` | `positives`, `geomean`, `positive_geomeans`, `both` |
-
-- **positives**: Detect positive peaks in each time bin
-- **geomean**: Calculate geometric mean across all channels
-- **positive_geomeans**: Use global thresholds and track geometric mean of positive cells
-- **both**: Combine positives and geomean approaches
-
-### Gating Parameters
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--mad-smoothing` | `0.01 0.05` | Smoothing factors for MAD-based time gating (space-separated) |
-| `--min-cells` | `1000` | Minimum cells required for processing a bin |
-| `--max-bins` | `600` | Maximum number of bins to divide data into |
-| `--step-val` | `200` | Step size for binning |
-| `--mad-factor` | `5` | Factor for MAD calculation for gating |
-
-### Advanced Options
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--enable-ssc` | False | Use SSC-A for debris gating in addition to FSC-A |
-| `--remove-beads` | False | Detect and remove beads based on SSC/FSC characteristics |
-| `--disable-remove-zeros` | False | Disable removal of zero values (zeros removed by default) |
-| `--disable-dask` | False | Disable within-file gate parallelism |
-
-### Plotting Options
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--enable-plots` | False | Generate time gate diagnostic plots |
-| `--plots-dir` | `time_gate_plots` | Directory to save time gate plots |
-
-## Output Files
-
-### Naming Convention
-
-Output files follow the pattern: `flowmop_<original_name>.fcs`
-
-Example: `sample001.fcs` produces `flowmop_sample001.fcs`
-
-### Canonical Annotated FCS
-
-The canonical FlowMOP output is a single annotated FCS file. It contains all
-original events in their original order, plus appended gating result channels.
-FlowMOP does not remove events from this canonical output.
-
-### Added Channels
-
-The output FCS file contains all original channels plus gating result channels:
+FlowMOP writes one annotated FCS file for each input, with the name `flowmop_<input name>.fcs`. For example, `sample001.fcs` gives `flowmop_sample001.fcs`. The file contains all original events in their original order, and these added channels:
 
 | Column | Description |
 |--------|-------------|
@@ -179,142 +112,173 @@ The output FCS file contains all original channels plus gating result channels:
 | `passed_debris` | Debris gate result |
 | `passed_time` | Time gate result |
 | `passed_doublet` | Doublet gate result |
-| `passed_final` | Combined result of all gates |
+| `passed_final` | 1 only when the event passed all gates |
 
-### Metadata Preservation
+To get the clean events, keep the events with `passed_final = 1`.
 
-FlowMOP preserves non-structural FCS metadata exposed by the reader, including
-the original detector names (`$PnN`), marker labels (`$PnS`), parameter ranges,
-and serialized spillover matrix. Protein labels are used internally for
-processing without replacing detector names in exported files. FlowMOP also
-adds processing metadata:
+### Summary table
+
+`flowmop_summary.csv` has one row for each input file of the run. You can open it in Excel.
+
+| Column | Description |
+|--------|-------------|
+| `file` | Input file name |
+| `status` | `ok`, `failed` or `skipped` |
+| `events` | Number of events in the input |
+| `passed_lod`, `passed_debris`, `passed_time`, `passed_doublet` | Number of events that passed each gate |
+| `passed_final` | Number of events that passed all gates |
+| `retained_percent` | `passed_final` as a percentage of `events` |
+| `seconds` | Processing time |
+| `output`, `log` | Paths of the output FCS file and the log file |
+| `error` | The error message for a failed file |
+| `input` | Full path of the input file |
+
+### Log files
+
+The screen shows only the result for each file. The full detail (channels, peaks, warnings, errors) goes to `logs/<input name>.log`. Use `--verbose` to also show the detail on the screen.
+
+### Metadata
+
+FlowMOP keeps the non-structural FCS metadata of the input, including the original detector names (`$PnN`), marker labels (`$PnS`), parameter ranges, and the serialized spillover matrix. FlowMOP uses the marker labels internally, but it does not replace the detector names in the output files. FlowMOP also adds processing metadata:
 
 - `flowmop_processed`: Processing flag
 - `flowmop_processing_date`: ISO timestamp
 - `flowmop_original_file`: Source file path
 - `flowmop_fluor_mode`: Mode used for fluorescence analysis
 - `flowmop_events_original`: Original event count
-- `flowmop_events_final`: Events passing all filters
-- `flowmop_retention_percent`: Percentage of events retained
-- Per-filter statistics (`flowmop_<filter>_passed`, `flowmop_<filter>_percent`)
+- `flowmop_events_final`: Events that passed all gates
+- `flowmop_retention_percent`: Percentage of events kept
+- Statistics for each gate (`flowmop_<gate>_passed`, `flowmop_<gate>_percent`)
 
-Structural fields such as byte offsets are regenerated as needed. The annotated
-output adds the `passed_*` channels after the original parameter table; the
-metadata of the original parameters is unchanged.
+FlowMOP makes the structural fields, for example the byte offsets, again as necessary. The `passed_*` channels come after the original parameter table, and the metadata of the original parameters does not change.
 
-### Filtered Outputs (Optional)
+### Filtered FCS files (optional)
 
-When `--export-filtered-fcs` is enabled, additional derivative FCS files
-containing only events that passed specific filters are created. These files
-contain only the original input parameters, so they can be compared directly
-with cleaned outputs from other quality-control tools:
+With `--export-filtered-fcs`, FlowMOP also writes FCS files that contain only the events that passed specified gates. These files contain only the original input parameters, so that you can compare them directly with the clean output of other quality-control tools:
 
-| Output Directory | Filter Criteria |
-|------------------|-----------------|
-| `passfiltered/` | Events passing all filters (`passed_final`) |
-| `timepass/` | Events passing time + LOD filters |
-| `debrispass/` | Events passing debris + LOD filters |
-| `doubletpass/` | Events passing doublet + LOD filters |
+| Output folder | Events in the file |
+|---------------|--------------------|
+| `passfiltered/` | Passed all gates (`passed_final`) |
+| `timepass/` | Passed the time and LOD gates |
+| `debrispass/` | Passed the debris and LOD gates |
+| `doubletpass/` | Passed the doublet and LOD gates |
 
-## Architecture
+To make these files later from annotated FCS files, run `python -m flowmop.output_complete --help`.
 
-### Module Structure
+## Options
 
-```
-src/
-├── flowmop_exec.py              # CLI entry point
-├── run_flowmop_directory.sh     # Batch processing script
-├── base/
-│   ├── flowmop_new.py           # FlowMOP class (main pipeline)
-│   └── output_complete_flowmop.py
-└── functions/
-    ├── time_gating.py           # Time-based anomaly detection
-    ├── debris_gating.py         # Debris removal (FSC-based)
-    ├── doublet_gating.py        # Doublet detection
-    └── flowmop_utils.py         # Utility functions
-```
+Run `flowmop --help` for the full list. The gate defaults are the values that the FlowMOP paper used.
 
-### Key Functions
+### Run options
 
-#### `load_data(file_path) -> (meta_raw, data_frame, channel_names)`
+| Option | Default | Description |
+|--------|---------|-------------|
+| `INPUT ...` | required | FCS or Parquet files, or folders (searched recursively) |
+| `-o`, `--output-dir` | `./flowmop_output` | Folder for the output files, logs and summary |
+| `-j`, `--jobs` | `1` | Number of files to process at the same time |
+| `--file-pattern` | all `.fcs` and `.parquet` | In folders, use only file names that match this pattern |
+| `--skip-existing` | off | Do not process an input when its output FCS exists |
+| `--dry-run` | off | List the files to process and stop |
+| `-v`, `--verbose` | off | Also show the full processing detail on the screen |
+| `--version` | | Show the FlowMOP version |
 
-Loads data from FCS or Parquet files. For FCS files, uses `readfcs` to extract
-data and metadata, with `fcsparser` as a fallback. Handles channel naming by
-preferring marker names over channel short names where available, except for
-FSC/SSC scatter parameters.
+### Output options
 
-#### `process_file(file_path, output_dir, ...)`
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--no-output-fcs` | off | Process the files, but do not write the annotated FCS files |
+| `--export-filtered-fcs` | off | Also write filtered FCS files (see above) |
+| `--filtered-output-dir` | output folder | Folder for the filtered FCS files |
+| `--enable-plots` | off | Write time gate diagnostic plots |
+| `--plots-dir` | `<output-dir>/plots` | Folder for the plots; each input gets a subfolder |
 
-Main processing function that:
-1. Loads data via `load_data()`
-2. Filters to numerical columns only
-3. Initializes `FlowMOP` with configuration
-4. Runs the gating pipeline
-5. Exports results with metadata preservation
+### Gate options
 
-#### `filter_numerical_columns(data) -> DataFrame`
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--skip-debris` | off | Do not apply the debris gate |
+| `--skip-time` | off | Do not apply the time gate |
+| `--skip-doublets` | off | Do not apply the doublet gate |
+| `--fluor-mode` | `positive_geomeans` | Fluorescence summary for the time gate: `positives`, `geomean`, `positive_geomeans` or `both` |
+| `--mad-smoothing` | `0.01 0.05` | Spline smoothing factors for the time gate |
+| `--mad-factor` | `5` | MAD threshold for the time gate |
+| `--min-cells` | `1000` | Minimum number of events in a time bin |
+| `--max-bins` | `600` | Maximum number of time bins |
+| `--step-val` | `200` | Step size for the time bins |
+| `--enable-ssc` | off | Also use SSC-A in the debris gate |
+| `--remove-beads` | off | Find and remove beads from SSC/FSC |
+| `--disable-remove-zeros` | off | Keep zero values (FlowMOP removes them by default) |
+| `--disable-dask` | off | Do not run the gates of one file in parallel |
 
-Filters DataFrame to keep only numerical columns. Raises `ValueError` if no numerical columns exist.
+Fluorescence modes:
 
-#### `write_filtered_fcs_files(base_output_dir, base_name, output_df, meta_raw)`
+- `positives`: find the positive peaks in each time bin.
+- `geomean`: use the geometric mean of all events in each time bin.
+- `positive_geomeans`: use global thresholds, and use the geometric mean of the positive events in each time bin.
+- `both`: use `positives` and `geomean` together.
 
-Creates filtered FCS files containing only events that passed specific gate combinations.
-
-#### `_clean_metadata(meta_raw, set_total_events=None) -> dict`
-
-Cleans and standardizes metadata for FCS output:
-- Strips structural byte offsets (recalculated by fcswrite)
-- Handles both fcsparser-style (`$KEY`) and readfcs-style (lowercase) keys
-- Preserves parameter metadata (`$PnG`, `$PnV`, etc.)
-
-### FlowMOP Class Integration
-
-`flowmop_exec.py` uses the `FlowMOP` class from `base/flowmop_new.py`:
+## Use FlowMOP from Python
 
 ```python
-from base import flowmop_new
+from flowmop import process_file
 
-flowmop = flowmop_new.FlowMOP(
-    time_channel_index=time_channel_index,
-    remove_zeros=remove_zeros,
-    min_cells=min_cells,
-    # ... other parameters
-)
-vectors = flowmop.process_fcs_data(marker_names, fcs_array)
+summary = process_file("sample.fcs", output_dir="results")
+print(summary["passed_final"], summary["retained_percent"])
 ```
 
-The `process_fcs_data()` method returns a dictionary of gate vectors:
-- `lod`: Limit of detection gate
-- `debris`: Debris gate
-- `time`: Time gate
-- `doublet`: Doublet gate
-- `final`: Combined result
+`process_file()` has the same defaults as the `flowmop` command. It returns a dict with the counts of the summary table and the path of the output FCS file.
 
-## Notes
+The lower-level `flowmop.FlowMOP` class works on a NumPy array. Its defaults are different from the defaults of `process_file()` (`fluor_mode="positives"`, `min_cells=150`, `max_bins=500`). To get the same result as the `flowmop` command, use `process_file()`, or give the class the values from the [gate options](#gate-options).
 
-### Parquet Support
+## Old batch script
 
-FlowMOP accepts Parquet files as input. When processing Parquet files, minimal synthetic metadata is created since Parquet files don't contain FCS metadata.
+The old commands continue to work:
 
-### Within-File Parallelism
+```bash
+python /path/to/FlowMOP/flowmop_exec.py sample.fcs --output-dir results
+./run_flowmop_directory.sh --input-dir ./fcs_files --output-dir results --max-parallel 4
+```
 
-By default, FlowMOP can run independent gates in parallel within a file. Disable with `--disable-dask` for debugging, batch jobs that already parallelize by file, or small files where parallel overhead exceeds benefits.
+`run_flowmop_directory.sh` now sends its options to the `flowmop` command line. It does not need GNU Parallel, and it does not rename input files. As before, it skips the files that have an output; use `--no-skip-processed` to process them again.
 
-### Channel Naming
+## Problems and solutions
 
-For FCS files, FlowMOP uses marker names when available, falling back to channel short names. Scatter parameters (FSC/SSC) always use the channel name since they typically don't have marker assignments.
+| Message | Cause and solution |
+|---------|--------------------|
+| `flowmop: command not found` | The Python environment with FlowMOP is not active. Activate it, or install FlowMOP again (see [Install](#install)). |
+| `flowmop: error: not found: <path>` | The path is not correct. Look for typing errors, and put quotes around a path with spaces. |
+| `these inputs give the same output name` | Two inputs in different folders have the same file name. Rename one of them, or process the folders one at a time with different output folders. |
+| `FAILED: ...` on one line | FlowMOP could not process that file. The other files continue. The log file named on the line contains the full error. |
+| Processing is slow | Use `--jobs` with a number up to the number of CPU cores. Each job holds one file in memory (approximately 0.7 GB for 460,000 events with 35 channels). |
 
-## Related Scripts
+FlowMOP finds the time channel from its name: the first channel with `time` in its name. It finds the scatter channels from the names `FSC-A`, `FSC-H`, `SSC-A` and `SSC-H`. If a file has no FSC-A channel, FlowMOP does not apply the limit of detection gate to it.
 
-### base/output_complete_flowmop.py
+## For developers
 
-This script is largely redundant with `flowmop_exec.py --export-filtered-fcs`:
+```bash
+pip install -e ".[test]"
+pytest
+```
 
-| Feature | flowmop_exec.py | output_complete_flowmop.py |
-|---------|-----------------|---------------------------|
-| Filtered FCS export | `--export-filtered-fcs` flag | Always runs |
-| Integration | Inline during processing | Standalone post-processor |
+Module structure:
 
-**Use case**: Post-process already-processed FCS files to generate filtered subsets without re-running the full pipeline.
+```text
+flowmop_exec.py              # old entry point (calls flowmop.cli)
+run_flowmop_directory.sh     # old batch entry point (calls flowmop_exec.py)
+flowmop/
+├── cli.py                   # command line: inputs, parallel jobs, logs, summary
+├── process.py               # process_file(): read, gate and write one file
+├── pipeline.py              # FlowMOP class: runs the gates on an array
+├── time_gating.py           # time gate
+├── debris_gating.py         # debris gate (FSC-based)
+├── doublet_gating.py        # doublet gate
+├── utils.py                 # histogram and smoothing utilities
+└── output_complete.py       # make filtered FCS files from annotated files
+```
 
-**Recommendation**: Use `flowmop_exec.py --export-filtered-fcs` for new processing.
+Notes:
+
+- FlowMOP also reads Parquet files. A Parquet file has no FCS metadata, so FlowMOP makes minimal metadata for its output.
+- For FCS files, FlowMOP uses the marker names when they exist, and the channel names when they do not. The scatter channels (FSC/SSC) always use the channel name.
+- By default, FlowMOP runs the gates of one file in parallel. Use `--disable-dask` for debugging, or when you use many `--jobs`.
+- The tests in `tests/test_benchmark_*.py` need the benchmark scripts of the FlowMOP paper repository. In a separate copy of FlowMOP, pytest skips them.

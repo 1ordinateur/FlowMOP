@@ -10,7 +10,7 @@ import warnings
 from scipy import stats
 from typing import Union, Tuple, List, Optional, Dict, Any
 import matplotlib.pyplot as plt
-from functions.flowmop_utils import process_histogram, find_peaks, find_left_minimum
+from flowmop.utils import process_histogram, find_peaks, find_left_minimum
 
 # Type definitions
 ArrayType = Union[np.ndarray, da.Array]

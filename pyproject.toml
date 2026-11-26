@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flowmop"
+dynamic = ["version"]
+description = "Automated time, debris and doublet gating for flow cytometry data (FCS and Parquet)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "matplotlib",
+    "dask[array]",
+    "readfcs",
+    "flowio",
+    "fcswrite",
+    "fcsparser",
+    "pyarrow",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+flowmop = "flowmop.cli:main"
+
+[project.urls]
+Source = "https://github.com/1ordinateur/FlowMOP"
+
+[tool.setuptools]
+packages = ["flowmop"]
+
+[tool.setuptools.dynamic]
+version = { attr = "flowmop.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

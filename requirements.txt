@@ -1,11 +1,3 @@
-numpy
-pandas
-scipy
-matplotlib
-dask
-distributed
-readfcs
-flowio
-fcswrite
-fcsparser
-pyarrow
+# Install FlowMOP and its dependencies (the list is in pyproject.toml).
+# Run from the FlowMOP folder: pip install -r requirements.txt
+-e .

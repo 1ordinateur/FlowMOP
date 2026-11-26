@@ -21,9 +21,9 @@ else:
 DEFAULT_ARRAY_MODULE = np
 
 # Import CPU implementations
-from functions.time_gating import TimeGateStrategy, MADTimeGate
-from functions.debris_gating import DebrisGateStrategy, FSCDebrisGate
-from functions.doublet_gating import DoubletGateStrategy, MADDoubletGate, InflectionDoubletGate
+from flowmop.time_gating import TimeGateStrategy, MADTimeGate
+from flowmop.debris_gating import DebrisGateStrategy, FSCDebrisGate
+from flowmop.doublet_gating import DoubletGateStrategy, MADDoubletGate, InflectionDoubletGate
 
 
 @dataclass(frozen=True)

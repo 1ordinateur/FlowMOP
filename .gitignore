@@ -3,3 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+
+# Local worktrees, builds and default output
+.worktrees/
+*.egg-info/
+build/
+dist/
+flowmop_output/

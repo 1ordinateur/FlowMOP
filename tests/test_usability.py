@@ -54,9 +54,8 @@ def _read_passed_final(path: Path) -> int:
     import flowio
 
     flow_data = flowio.FlowData(str(path))
-    names = [flow_data.channels[str(i + 1)]["pnn"] for i in range(flow_data.channel_count)]
-    events = np.reshape(flow_data.events, (-1, flow_data.channel_count))
-    return int(events[:, names.index("passed_final")].sum())
+    events = flow_data.as_array(preprocess=False)
+    return int(events[:, flow_data.pnn_labels.index("passed_final")].sum())
 
 
 def _read_summary(out_dir: Path) -> dict:
@@ -230,6 +229,25 @@ def test_batch_run_screen_output_is_short(batch_run):
     assert "Warning" not in screen
 
 
+def test_parallel_workers_print_nothing_on_the_terminal(tmp_path):
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    _write_synthetic_fcs(inputs / "p1.fcs", seed=6)
+    _write_synthetic_fcs(inputs / "p2.fcs", seed=7)
+    env = dict(os.environ, PYTHONPATH=str(REPO_ROOT))
+
+    result = _run(
+        [sys.executable, "-m", "flowmop", str(inputs), "-o", str(tmp_path / "out"), "--jobs", "2"],
+        cwd=tmp_path,
+        env=env,
+    )
+
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(lines) == 4, result.stdout
+    assert result.stderr.strip() == "", result.stderr
+
+
 def test_batch_summary_matches_output_files(batch_run):
     out = batch_run["out"]
     summary = _read_summary(out)
@@ -244,6 +262,23 @@ def test_batch_summary_matches_output_files(batch_run):
         assert int(row["events"]) == 20000
         assert int(row["passed_final"]) == passed_final
         assert float(row["retained_percent"]) == pytest.approx(100 * passed_final / 20000, abs=0.01)
+
+
+def test_sequential_run_continues_after_a_failed_file(tmp_path, capsys):
+    from flowmop.cli import main
+
+    good = tmp_path / "good.fcs"
+    _write_synthetic_fcs(good, seed=8)
+    bad = tmp_path / "broken.fcs"
+    bad.write_bytes(b"this is not an FCS file")
+    out = tmp_path / "out"
+
+    code = main([str(bad), str(good), "-o", str(out), "--jobs", "1"])
+
+    assert code == 1
+    assert (out / "flowmop_good.fcs").is_file()
+    assert "FAILED" in capsys.readouterr().out
+    assert _read_summary(out)["broken.fcs"]["status"] == "failed"
 
 
 def test_skip_existing_keeps_the_old_output(tmp_path, capsys):
