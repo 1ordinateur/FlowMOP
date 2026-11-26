@@ -30,9 +30,10 @@ def _import_dependencies(module_names: List[str]) -> Dict[str, Any]:
     return modules
 
 
+from flowmop.modes import FLUOR_MODES, canonical_fluor_mode
+
 # Defaults of the paper runs. The CLI and process_file() use these values.
-FLUOR_MODES = ('positives', 'geomean', 'positive_geomeans', 'both')
-DEFAULT_FLUOR_MODE = 'positive_geomeans'
+DEFAULT_FLUOR_MODE = 'positives'
 DEFAULT_MAD_SMOOTHING = [0.01, 0.05]
 DEFAULT_MIN_CELLS = 1000
 DEFAULT_MAX_BINS = 600
@@ -549,10 +550,11 @@ def process_file(
         file_path: Path to the data file (FCS or Parquet)
         output_dir: Directory to save output files (defaults to same as input)
         fluor_mode: Mode for fluorescence analysis:
-            - 'positives': Detect positive peaks in each time bin
+            - 'positives': Use global thresholds and track geometric mean of positive cells
+              (the mode of the paper; the old name 'positive_geomeans' is also accepted)
+            - 'peaks': Detect positive peaks in each time bin
             - 'geomean': Calculate geometric mean across all channels
-            - 'positive_geomeans': Use global thresholds and track geometric mean of positive cells
-            - 'both': Combine 'positives' and 'geomean' approaches
+            - 'both': Combine 'peaks' and 'geomean' approaches
         mad_smoothing: List of smoothing factors for MAD-based time gating
         enable_plots: Whether to generate time gate plots
         plots_dir: Directory to save time gate plots
@@ -576,6 +578,10 @@ def process_file(
         time, doublet and final, retained_percent, and output (the written
         FCS path, or an empty string when no FCS is written).
     """
+    fluor_mode = canonical_fluor_mode(fluor_mode)
+    if fluor_mode not in FLUOR_MODES:
+        raise ValueError(f"unknown fluor_mode {fluor_mode!r}; use one of {', '.join(FLUOR_MODES)}")
+
     # Load data file with complete metadata extraction
     meta_raw, data_df, _canonical_channel_names = load_data(file_path)
     _load_numpy()

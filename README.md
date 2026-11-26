@@ -70,7 +70,7 @@ flowmop ./fcs_files --output-dir results --jobs 4
 The screen shows one line for each file:
 
 ```text
-FlowMOP 0.2.0: 3 file(s), 3 job(s), output in results
+FlowMOP 0.3.0: 3 file(s), 3 job(s), output in results
 [1/3] 12A.fcs  253,728 events  83.0% kept  10.6 s
 [2/3] 11B.fcs  258,952 events  34.0% kept  11.1 s
 [3/3] 10A.fcs  463,512 events  66.9% kept  14.7 s
@@ -201,7 +201,7 @@ Run `flowmop --help` for the full list. The gate defaults are the values that th
 | `--skip-debris` | off | Do not apply the debris gate |
 | `--skip-time` | off | Do not apply the time gate |
 | `--skip-doublets` | off | Do not apply the doublet gate |
-| `--fluor-mode` | `positive_geomeans` | Fluorescence summary for the time gate: `positives`, `geomean`, `positive_geomeans` or `both` |
+| `--fluor-mode` | `positives` | Fluorescence mode of the time gate: `positives`, `peaks`, `geomean` or `both` |
 | `--mad-smoothing` | `0.01 0.05` | Spline smoothing factors for the time gate |
 | `--mad-factor` | `5` | MAD threshold for the time gate |
 | `--min-cells` | `1000` | Minimum number of events in a time bin |
@@ -214,10 +214,12 @@ Run `flowmop --help` for the full list. The gate defaults are the values that th
 
 Fluorescence modes:
 
-- `positives`: find the positive peaks in each time bin.
+- `positives` (default): the mode of the FlowMOP paper. Global thresholds find the positive events, and the time gate uses the geometric mean of the positive events in each time bin.
+- `peaks`: find the positive peaks again in each time bin.
 - `geomean`: use the geometric mean of all events in each time bin.
-- `positive_geomeans`: use global thresholds, and use the geometric mean of the positive events in each time bin.
-- `both`: use `positives` and `geomean` together.
+- `both`: use `peaks` and `geomean` together. FlowMOP removes an event only when two or more checks reject it.
+
+Names before version 0.3.0: the `positives` mode had the name `positive_geomeans`, and the `peaks` mode had the name `positives`. FlowMOP still accepts `positive_geomeans`. If an old command or script uses `--fluor-mode positives` and you want the old peak behaviour, change it to `--fluor-mode peaks`.
 
 ## Use FlowMOP from Python
 
@@ -230,7 +232,7 @@ print(summary["passed_final"], summary["retained_percent"])
 
 `process_file()` has the same defaults as the `flowmop` command. It returns a dict with the counts of the summary table and the path of the output FCS file.
 
-The lower-level `flowmop.FlowMOP` class works on a NumPy array. Its defaults are different from the defaults of `process_file()` (`fluor_mode="positives"`, `min_cells=150`, `max_bins=500`). To get the same result as the `flowmop` command, use `process_file()`, or give the class the values from the [gate options](#gate-options).
+The lower-level `flowmop.FlowMOP` class works on a NumPy array. Its defaults are different from the defaults of `process_file()` (`fluor_mode="peaks"`, `min_cells=150`, `max_bins=500`). To get the same result as the `flowmop` command, use `process_file()`, or give the class the values from the [gate options](#gate-options).
 
 ## Old batch script
 

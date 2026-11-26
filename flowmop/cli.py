@@ -29,6 +29,7 @@ from flowmop.process import (
     FLUOR_MODES,
     partial_output_path,
 )
+from flowmop.modes import canonical_fluor_mode
 
 FLOW_SUFFIXES = (".fcs", ".parquet")
 DEFAULT_OUTPUT_DIR = "flowmop_output"
@@ -109,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     gates.add_argument("--skip-debris", action="store_true", help="do not apply the debris gate")
     gates.add_argument("--skip-time", action="store_true", help="do not apply the time gate")
     gates.add_argument("--skip-doublets", action="store_true", help="do not apply the doublet gate")
-    gates.add_argument("--fluor-mode", choices=FLUOR_MODES, default=DEFAULT_FLUOR_MODE, help=f"fluorescence summary for the time gate (default: {DEFAULT_FLUOR_MODE})")
+    gates.add_argument("--fluor-mode", type=canonical_fluor_mode, choices=FLUOR_MODES, default=DEFAULT_FLUOR_MODE, help=f"fluorescence mode of the time gate (default: {DEFAULT_FLUOR_MODE}, the mode of the paper; the old name positive_geomeans is also accepted)")
     gates.add_argument("--mad-smoothing", type=float, nargs="+", default=list(DEFAULT_MAD_SMOOTHING), help="spline smoothing factors for the time gate (default: 0.01 0.05)")
     gates.add_argument("--mad-factor", type=int, default=DEFAULT_MAD_FACTOR, help=f"MAD threshold for the time gate (default: {DEFAULT_MAD_FACTOR})")
     gates.add_argument("--min-cells", type=int, default=DEFAULT_MIN_CELLS, help=f"minimum events in a time bin (default: {DEFAULT_MIN_CELLS})")

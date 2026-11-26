@@ -84,7 +84,7 @@ class FlowMOP:
                  doublet_config: Optional[dict] = None,
                  enable_dask: bool = True,
                  chunk_size: Optional[int] = None,
-                 fluor_mode: str = 'positives',
+                 fluor_mode: str = 'peaks',
                  enable_plots: bool = False,
                  plots_dir: str = 'time_gate_plots',
                  enable_ssc: bool = False,
@@ -120,7 +120,8 @@ class FlowMOP:
                     - fallback_mad_threshold: Fallback MAD threshold
             enable_dask: Legacy flag controlling within-file gate parallelism
             chunk_size: Kept for compatibility with older Dask-array callers
-            fluor_mode: Mode for fluorescence analysis ('positives', 'geomean', or 'both')
+            fluor_mode: Mode for fluorescence analysis ('positives', 'peaks', 'geomean' or 'both';
+                see flowmop.modes). The default 'peaks' is not the mode of the paper.
             enable_plots: Whether to generate diagnostic plots during time gating
             plots_dir: Directory to save time gate diagnostic plots
             enable_ssc: Whether to use SSC-A for debris gating in addition to FSC-A

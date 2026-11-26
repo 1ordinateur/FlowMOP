@@ -10,6 +10,7 @@ import numpy.ma as ma
 from scipy.ndimage import maximum_filter1d
 from scipy.interpolate import UnivariateSpline
 from abc import ABC, abstractmethod
+from flowmop.modes import FLUOR_MODES, canonical_fluor_mode
 from flowmop.utils import process_histogram, Peak
 from flowmop.utils import normalize_timeseries_values, apply_spline_smoothing, calculate_mad_thresholds
 import logging
@@ -40,10 +41,11 @@ class MADTimeGate(TimeGateStrategy):
     and MAD-based outlier detection with configurable smoothing factors.
 
     Supports multiple operational modes:
-    - 'positives': Detects positive peaks in each time bin and monitors their stability
+    - 'positives': Uses global thresholds to identify positive events, then tracks their geometric mean
+      (the mode of the FlowMOP paper; the old name 'positive_geomeans' is also accepted)
+    - 'peaks': Detects positive peaks in each time bin and monitors their stability
     - 'geomean': Calculates geometric mean of all fluorescence channels in each time bin
-    - 'positive_geomeans': Uses global thresholds to identify positive events, then tracks their geometric mean
-    - 'both': Combines 'positives' and 'geomean' approaches for maximum sensitivity
+    - 'both': Combines 'peaks' and 'geomean' approaches for maximum sensitivity
 
     Attributes:
         remove_zeros (bool): Whether to remove zero values during processing
@@ -63,7 +65,7 @@ class MADTimeGate(TimeGateStrategy):
     """
     def __init__(self, remove_zeros=True, min_cells=150, max_bins=500, step=200, mad_threshold=5,
                  peak_removal=1/3, min_nr_bins_peakdetection=5, histogram_smoothing=5, mad_method='all',
-                 mad_smoothing=None, enable_dask=True, fluor_mode='positives', enable_plots=False,
+                 mad_smoothing=None, enable_dask=True, fluor_mode='peaks', enable_plots=False,
                  plots_dir="time_gate_plots"):
         self.remove_zeros = remove_zeros
         self.min_cells = min_cells
@@ -77,7 +79,7 @@ class MADTimeGate(TimeGateStrategy):
         self.mad_smoothing = mad_smoothing if mad_smoothing is not None else [0.01, 0.05]
         self.plot_counter = 0
         self.enable_dask = enable_dask
-        self.fluor_mode = fluor_mode  # 'positives', 'geomean', 'positive_geomeans', or 'both'
+        self.fluor_mode = fluor_mode  # one of flowmop.modes.FLUOR_MODES (or an old alias)
         self.enable_plots = enable_plots
         self.plots_dir = plots_dir
         self.current_marker = "Unknown"
@@ -116,13 +118,16 @@ class MADTimeGate(TimeGateStrategy):
         rejection_count = np.zeros(data.shape[0], dtype=int)
 
         # Process based on selected mode(s)
-        if self.fluor_mode in ['positives', 'both']:
+        mode = canonical_fluor_mode(self.fluor_mode)
+        if mode not in FLUOR_MODES:
+            raise ValueError(f"unknown fluor_mode {self.fluor_mode!r}; use one of {', '.join(FLUOR_MODES)}")
+        if mode in ['peaks', 'both']:
             rejection_count = self._process_positive_peaks(data, fluoro_channels, breaks['breaks'],
                                                         marker_names, rejection_count)
-        if self.fluor_mode in ['geomean', 'both']:
+        if mode in ['geomean', 'both']:
             rejection_count = self._process_geometric_mean(data, fluoro_channels, breaks['breaks'],
                                                         rejection_count)
-        if self.fluor_mode == 'positive_geomeans':
+        if mode == 'positives':
             rejection_count = self._process_positive_geomeans(data, fluoro_channels, breaks['breaks'],
                                                          marker_names, rejection_count)
 
@@ -1106,7 +1111,7 @@ class MADTimeGate(TimeGateStrategy):
                                  breaks: List[np.ndarray], marker_names: list,
                                  rejection_count: np.ndarray) -> np.ndarray:
         """
-        Process data using the 'positive_geomeans' method:
+        Process data using the 'positives' method (old name 'positive_geomeans'):
         1. Determine global thresholds for each channel using existing infrastructure
         2. For each time bin and channel, calculate geometric mean of cells above threshold
         3. Apply MAD thresholding to each channel's time series independently
@@ -1121,7 +1126,7 @@ class MADTimeGate(TimeGateStrategy):
         Returns:
             Updated rejection_count array
         """
-        self.logger.info("Processing using positive_geomeans mode")
+        self.logger.info("Processing using positives mode")
 
         # Get thresholds using existing method that already leverages Dask
         threshold_frames = self._determine_thresholds_all_channels(data, fluoro_channels, breaks, marker_names)

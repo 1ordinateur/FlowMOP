@@ -4,7 +4,7 @@ Command line:  flowmop INPUT... --output-dir OUT
 Python:        from flowmop import process_file
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = ["__version__", "process_file", "FlowMOP"]
 
