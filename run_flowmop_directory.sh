@@ -55,7 +55,17 @@ JOBS=4
 SKIP_EXISTING=1
 ARGS=()
 
+need_value() {
+    if [[ $# -lt 2 ]]; then
+        echo "Error: $1 needs a value (see --help)" >&2
+        exit 1
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --input-dir|--output-dir|--max-parallel|--file-pattern|--mad-smoothing) need_value "$@" ;;
+    esac
     case "$1" in
         --input-dir) INPUT_DIR="$2"; shift 2 ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;

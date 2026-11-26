@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
@@ -304,16 +305,29 @@ def _write_fcs_preserving_parameters(
         metadata[f'$P{index}R'] = '1'
         metadata[f'$P{index}G'] = '1.0'
 
+    filename = Path(filename)
     filename.parent.mkdir(parents=True, exist_ok=True)
     event_data = np.asarray(data, dtype=np.float32).reshape(-1)
-    with filename.open('wb') as output_handle:
-        flowio.create_fcs(
-            output_handle,
-            event_data,
-            detector_names,
-            opt_channel_names=marker_names,
-            metadata_dict=metadata,
-        )
+    # Write to a hidden part file first, so that a stopped run leaves no
+    # incomplete FCS file with the final name.
+    part_file = partial_output_path(filename)
+    try:
+        with part_file.open('wb') as output_handle:
+            flowio.create_fcs(
+                output_handle,
+                event_data,
+                detector_names,
+                opt_channel_names=marker_names,
+                metadata_dict=metadata,
+            )
+        os.replace(part_file, filename)
+    finally:
+        part_file.unlink(missing_ok=True)
+
+
+def partial_output_path(filename: Path) -> Path:
+    """Return the temporary path that is used while an FCS file is written."""
+    return filename.with_name(f".{filename.name}.part")
 
 
 def _ensure_numpy(vector: Any) -> np.ndarray:

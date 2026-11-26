@@ -87,7 +87,9 @@ flowmop sample.fcs -o results --skip-debris --skip-doublets   # time gate only
 flowmop sample.fcs -o results --enable-plots             # also write time gate plots
 ```
 
-If you do not give `--output-dir`, FlowMOP writes to `./flowmop_output`. FlowMOP never changes or renames the input files.
+If you do not give `--output-dir`, FlowMOP writes to `./flowmop_output`. The output folder can also be the input folder. FlowMOP never changes or renames the input files, and it never uses its own output files as inputs.
+
+To stop a run, push Ctrl+C. FlowMOP stops the files that are in progress, writes the summary for the finished files, and exits with code 130. To continue later, run the same command with `--skip-existing`.
 
 ## Output
 
@@ -118,7 +120,7 @@ To get the clean events, keep the events with `passed_final = 1`.
 
 ### Summary table
 
-`flowmop_summary.csv` has one row for each input file of the run. You can open it in Excel.
+`flowmop_summary.csv` has one row for each input file. You can open it in Excel. Each run adds its rows to the summary in the output folder. When a run processes a file again, its new row replaces the old row. A file that `--skip-existing` skips keeps the counts of the run that made its output.
 
 | Column | Description |
 |--------|-------------|
@@ -249,6 +251,8 @@ python /path/to/FlowMOP/flowmop_exec.py sample.fcs --output-dir results
 | `flowmop: error: not found: <path>` | The path is not correct. Look for typing errors, and put quotes around a path with spaces. |
 | `these inputs give the same output name` | Two inputs in different folders have the same file name. Rename one of them, or process the folders one at a time with different output folders. |
 | `FAILED: ...` on one line | FlowMOP could not process that file. The other files continue. The log file named on the line contains the full error. |
+| `FAILED: the worker process stopped ...` | The system stopped the process of that file, usually because there was not sufficient memory. Use a smaller `--jobs` value. |
+| `flowmop: error: the output path is not a folder` | The `--output-dir` path is a file. Give a folder path. |
 | Processing is slow | Use `--jobs` with a number up to the number of CPU cores. Each job holds one file in memory (approximately 0.7 GB for 460,000 events with 35 channels). |
 
 FlowMOP finds the time channel from its name: the first channel with `time` in its name. It finds the scatter channels from the names `FSC-A`, `FSC-H`, `SSC-A` and `SSC-H`. If a file has no FSC-A channel, FlowMOP does not apply the limit of detection gate to it.

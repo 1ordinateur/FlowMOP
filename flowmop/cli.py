@@ -7,15 +7,16 @@ import contextlib
 import csv
 import fnmatch
 import multiprocessing
+import multiprocessing.connection
 import os
+import signal
 import sys
 import time
 import traceback
 import warnings
 from dataclasses import dataclass
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from flowmop import __version__
 from flowmop.process import (
@@ -26,11 +27,15 @@ from flowmop.process import (
     DEFAULT_MIN_CELLS,
     DEFAULT_STEP_VAL,
     FLUOR_MODES,
+    partial_output_path,
 )
 
 FLOW_SUFFIXES = (".fcs", ".parquet")
 DEFAULT_OUTPUT_DIR = "flowmop_output"
 SUMMARY_NAME = "flowmop_summary.csv"
+# Subfolders that FlowMOP writes into the output folder.
+OUTPUT_SUBFOLDERS = ("logs", "plots", "passfiltered", "timepass", "debrispass", "doubletpass")
+EXIT_STOPPED = 130
 SUMMARY_COLUMNS = [
     "file",
     "status",
@@ -123,15 +128,42 @@ def _matches(path: Path, file_pattern: Optional[str]) -> bool:
     return path.suffix.lower() in FLOW_SUFFIXES
 
 
-def _is_inside(path: Path, folder: Path) -> bool:
+def _relative_to(path: Path, folder: Path) -> Optional[Path]:
     try:
-        path.resolve().relative_to(folder.resolve())
+        return path.resolve().relative_to(folder.resolve())
     except ValueError:
+        return None
+
+
+def _is_flowmop_output(path: Path, output_dir: Path) -> bool:
+    """True for a file that FlowMOP writes into the output folder."""
+    relative = _relative_to(path, output_dir)
+    if relative is None:
         return False
-    return True
+    if len(relative.parts) == 1:
+        return relative.name.lower().startswith(("flowmop_", ".flowmop_"))
+    return relative.parts[0] in OUTPUT_SUBFOLDERS
 
 
-def collect_inputs(paths: Sequence[str], file_pattern: Optional[str] = None, output_dir: Optional[Path] = None) -> List[Path]:
+def _skip_in_folder(item: Path, folder: Path, output_dir: Optional[Path], skip_roots: Sequence[Path]) -> bool:
+    if any(_relative_to(item, root) is not None for root in skip_roots):
+        return True
+    if output_dir is None:
+        return False
+    output_inside_folder = _relative_to(output_dir, folder)
+    if output_inside_folder is not None and output_inside_folder.parts:
+        # A separate output folder inside the input folder: skip all of it.
+        return _relative_to(item, output_dir) is not None
+    # The output folder is the input folder (or contains it): skip FlowMOP files only.
+    return _is_flowmop_output(item, output_dir)
+
+
+def collect_inputs(
+    paths: Sequence[str],
+    file_pattern: Optional[str] = None,
+    output_dir: Optional[Path] = None,
+    skip_roots: Sequence[Path] = (),
+) -> List[Path]:
     """Expand files and folders to a list of input files; raise InputError on a problem."""
     found: List[Path] = []
     for raw in paths:
@@ -144,15 +176,17 @@ def collect_inputs(paths: Sequence[str], file_pattern: Optional[str] = None, out
                 for item in path.rglob("*")
                 if item.is_file()
                 and _matches(item, file_pattern)
-                and not (output_dir is not None and _is_inside(item, output_dir))
+                and not _skip_in_folder(item, path, output_dir, skip_roots)
             )
             if not matches:
                 raise InputError(f"no matching FCS or Parquet files in folder: {path}")
             found.extend(matches)
-        elif file_pattern or path.suffix.lower() in FLOW_SUFFIXES:
-            found.append(path)
-        else:
+        elif path.suffix.lower() not in FLOW_SUFFIXES:
             raise InputError(f"not an FCS or Parquet file: {path}")
+        elif output_dir is not None and _is_flowmop_output(path, output_dir):
+            raise InputError(f"this is a FlowMOP output file in the output folder: {path}")
+        else:
+            found.append(path)
 
     unique: List[Path] = []
     seen = set()
@@ -162,9 +196,10 @@ def collect_inputs(paths: Sequence[str], file_pattern: Optional[str] = None, out
             seen.add(key)
             unique.append(path)
 
+    # Compare names with no regard to letter case: Windows and macOS file systems do the same.
     by_stem: Dict[str, List[Path]] = {}
     for path in unique:
-        by_stem.setdefault(path.stem, []).append(path)
+        by_stem.setdefault(path.stem.lower(), []).append(path)
     clashes = [group for group in by_stem.values() if len(group) > 1]
     if clashes:
         lines = "\n".join("  " + ", ".join(str(path) for path in group) for group in clashes)
@@ -227,7 +262,7 @@ def run_one(input_path: str, options: Dict[str, Any], plots_root: str, log_path:
     from flowmop.process import process_file
 
     started = time.perf_counter()
-    row: Dict[str, Any] = {"input": str(input_path), "log": str(log_path)}
+    row: Dict[str, Any] = {}
     Path(log_path).parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "w", encoding="utf-8") as log:
         stream = _Tee(log, sys.__stdout__) if verbose and sys.__stdout__ is not None else log
@@ -241,10 +276,95 @@ def run_one(input_path: str, options: Dict[str, Any], plots_root: str, log_path:
                 traceback.print_exc()
                 row["status"] = "failed"
                 row["error"] = _one_line(exc)
-    row["file"] = Path(input_path).name
-    row["input"] = str(input_path)
+    row.update(_identity(input_path, log_path))
     row["seconds"] = round(time.perf_counter() - started, 1)
     return row
+
+
+def _identity(input_path: str, log_path: str) -> Dict[str, str]:
+    return {"file": Path(input_path).name, "input": str(Path(input_path).resolve()), "log": str(log_path)}
+
+
+def _worker_main(connection, call: Tuple) -> None:
+    # The parent process stops the run on Ctrl+C; the workers ignore it.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    connection.send(run_one(*call))
+    connection.close()
+
+
+def _stopped_row(call: Tuple, exitcode: Optional[int]) -> Dict[str, Any]:
+    row = _identity(call[0], call[3])
+    row.update(status="failed", seconds="", error=f"the worker process stopped (exit code {exitcode}), for example because it had no more memory")
+    return row
+
+
+def _remove_partial_output(call: Tuple) -> None:
+    output_dir = Path(call[1]["output_dir"])
+    partial_output_path(output_path_for(Path(call[0]), output_dir)).unlink(missing_ok=True)
+
+
+def _run_sequential(calls: List[Tuple], report: Callable[[Dict[str, Any]], None]) -> bool:
+    """Run the files one after the other in this process. Return True when stopped."""
+    for call in calls:
+        try:
+            report(run_one(*call))
+        except KeyboardInterrupt:
+            _remove_partial_output(call)
+            return True
+    return False
+
+
+def _run_parallel(calls: List[Tuple], jobs: int, report: Callable[[Dict[str, Any]], None]) -> bool:
+    """Run each file in its own worker process, at most `jobs` at the same time.
+
+    A worker that stops (for example, when the system kills it) fails only its
+    own file. Return True when the user stopped the run with Ctrl+C.
+    """
+    # "spawn" gives the same behaviour on Linux, macOS and Windows.
+    context = multiprocessing.get_context("spawn")
+    waiting = list(calls)
+    running: Dict[Any, Tuple[Any, Any, Tuple]] = {}
+    stop_requested: List[bool] = []
+    # A KeyboardInterrupt can arrive inside multiprocessing code that ignores it,
+    # so Ctrl+C only sets a flag, and the loop below looks at the flag.
+    try:
+        previous_handler = signal.signal(signal.SIGINT, lambda *_: stop_requested.append(True))
+    except ValueError:  # not in the main thread
+        previous_handler = None
+    try:
+        while (waiting or running) and not stop_requested:
+            while waiting and len(running) < jobs and not stop_requested:
+                call = waiting.pop(0)
+                receiver, sender = context.Pipe(duplex=False)
+                process = context.Process(target=_worker_main, args=(sender, call))
+                process.start()
+                sender.close()
+                running[process.sentinel] = (process, receiver, call)
+            for sentinel in multiprocessing.connection.wait(list(running), timeout=0.5):
+                process, receiver, call = running.pop(sentinel)
+                try:
+                    row = receiver.recv() if receiver.poll() else None
+                except EOFError:
+                    row = None
+                receiver.close()
+                process.join()
+                if row is None:
+                    _remove_partial_output(call)
+                    row = _stopped_row(call, process.exitcode)
+                report(row)
+    except KeyboardInterrupt:
+        stop_requested.append(True)
+    finally:
+        if previous_handler is not None:
+            signal.signal(signal.SIGINT, previous_handler)
+        if stop_requested:
+            for process, receiver, call in running.values():
+                process.terminate()
+            for process, receiver, call in running.values():
+                process.join()
+                receiver.close()
+                _remove_partial_output(call)
+    return bool(stop_requested)
 
 
 def _report_line(index: int, total: int, row: Dict[str, Any]) -> str:
@@ -259,48 +379,49 @@ def _report_line(index: int, total: int, row: Dict[str, Any]) -> str:
     return f"{counter} {row['file']}  FAILED: {row.get('error', '')}  (log: {row['log']})"
 
 
-def write_summary(output_dir: Path, rows: List[Dict[str, Any]]) -> Path:
+def _read_summary_rows(path: Path) -> List[Dict[str, str]]:
+    if not path.is_file():
+        return []
+    try:
+        with open(path, newline="", encoding="utf-8") as handle:
+            return [row for row in csv.DictReader(handle) if row.get("input")]
+    except (OSError, csv.Error, UnicodeDecodeError):
+        return []
+
+
+def write_summary(output_dir: Path, rows: Iterable[Dict[str, Any]]) -> Path:
+    """Merge the rows of this run into the summary of earlier runs and write it."""
     path = output_dir / SUMMARY_NAME
+    merged: Dict[str, Dict[str, Any]] = {row["input"]: row for row in _read_summary_rows(path)}
+    for row in rows:
+        earlier = merged.get(row["input"])
+        if row["status"] == "skipped" and earlier is not None:
+            # Keep the counts of the run that made the output.
+            row = {**earlier, "status": "skipped"}
+        merged[row["input"]] = row
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=SUMMARY_COLUMNS, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(merged.values())
     return path
 
 
-def _run_all(pending: List[Path], args: argparse.Namespace, output_dir: Path) -> List[Dict[str, Any]]:
-    options = _process_options(args)
-    plots_root = str(Path(args.plots_dir) if args.plots_dir else output_dir / "plots")
-    logs = output_dir / "logs"
-    calls = [(str(path), options, plots_root, str(logs / f"{path.stem}.log"), args.verbose) for path in pending]
-    rows: List[Dict[str, Any]] = []
-
-    if args.jobs == 1 or len(pending) <= 1:
-        for call in calls:
-            rows.append(run_one(*call))
-            print(_report_line(len(rows), len(calls), rows[-1]), flush=True)
-        return rows
-
-    # "spawn" gives the same behaviour on Linux, macOS and Windows.
-    context = multiprocessing.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=min(args.jobs, len(calls)), mp_context=context) as pool:
-        futures = {pool.submit(run_one, *call): call for call in calls}
-        for future in as_completed(futures):
-            call = futures[future]
-            try:
-                row = future.result()
-            except Exception as exc:  # for example, a worker process that stopped
-                row = {"file": Path(call[0]).name, "input": call[0], "log": call[3], "status": "failed", "error": _one_line(exc), "seconds": ""}
-            rows.append(row)
-            print(_report_line(len(rows), len(calls), row), flush=True)
-    return rows
+def _prepare_output_dir(output_dir: Path) -> None:
+    if output_dir.exists() and not output_dir.is_dir():
+        raise InputError(f"the output path is not a folder: {output_dir}")
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise InputError(f"cannot make the output folder {output_dir}: {exc.strerror or exc}") from exc
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     output_dir = Path(args.output_dir)
+    plots_root = Path(args.plots_dir) if args.plots_dir else output_dir / "plots"
+    skip_roots = [Path(folder) for folder in (args.filtered_output_dir, args.plots_dir) if folder]
     try:
-        inputs = collect_inputs(args.inputs, args.file_pattern, output_dir)
+        inputs = collect_inputs(args.inputs, args.file_pattern, output_dir, skip_roots)
     except InputError as exc:
         print(f"flowmop: error: {exc}", file=sys.stderr)
         return 2
@@ -319,27 +440,45 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"  {path}  (skipped: output exists)")
         return 0
 
+    try:
+        _prepare_output_dir(output_dir)
+    except InputError as exc:
+        print(f"flowmop: error: {exc}", file=sys.stderr)
+        return 2
+
     # Plots are written to files only; no plot window must open.
     os.environ.setdefault("MPLBACKEND", "Agg")
-    output_dir.mkdir(parents=True, exist_ok=True)
     print(f"FlowMOP {__version__}: {len(pending)} file(s), {args.jobs} job(s), output in {output_dir}", flush=True)
 
     rows: List[Dict[str, Any]] = []
-    for path in skipped:
-        rows.append({"file": path.name, "input": str(path), "status": "skipped", "output": str(output_path_for(path, output_dir))})
-        print(_report_line(len(rows), len(inputs), rows[-1]), flush=True)
-    rows.extend(_run_all(pending, args, output_dir))
 
-    order = {str(path): index for index, path in enumerate(inputs)}
-    rows.sort(key=lambda row: order.get(row["input"], len(order)))
-    summary_path = write_summary(output_dir, rows)
+    def report(row: Dict[str, Any]) -> None:
+        rows.append(row)
+        print(_report_line(len(rows), len(inputs), row), flush=True)
+
+    logs = output_dir / "logs"
+    for path in skipped:
+        row = _identity(str(path), str(logs / f"{path.stem}.log"))
+        report({**row, "status": "skipped", "output": str(output_path_for(path, output_dir))})
+
+    options = _process_options(args)
+    calls = [(str(path), options, str(plots_root), str(logs / f"{path.stem}.log"), args.verbose) for path in pending]
+    if args.jobs == 1 or len(calls) <= 1:
+        stopped = _run_sequential(calls, report)
+    else:
+        stopped = _run_parallel(calls, args.jobs, report)
+
+    order = {str(path.resolve()): index for index, path in enumerate(inputs)}
+    summary_path = write_summary(output_dir, sorted(rows, key=lambda row: order.get(row["input"], len(order))))
 
     failed = sum(row["status"] == "failed" for row in rows)
     done = sum(row["status"] == "ok" for row in rows)
-    parts = [f"Done: {done} of {len(inputs)} file(s) processed"]
+    parts = [f"{'Stopped' if stopped else 'Done'}: {done} of {len(inputs)} file(s) processed"]
     if skipped:
         parts.append(f"{len(skipped)} skipped")
     if failed:
         parts.append(f"{failed} FAILED")
-    print(", ".join(parts) + f". Summary: {summary_path}  Logs: {output_dir / 'logs'}")
+    print(", ".join(parts) + f". Summary: {summary_path}  Logs: {logs}", flush=True)
+    if stopped:
+        return EXIT_STOPPED
     return 1 if failed else 0
