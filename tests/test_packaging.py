@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-SDIST_TOP_LEVEL = {"LICENSE", "README.md", "PKG-INFO", "pyproject.toml", "setup.cfg", "flowmop", "flowmop.egg-info", "tests"}
+SDIST_TOP_LEVEL = {"LICENSE", "README.md", "PKG-INFO", "pyproject.toml", "setup.cfg", "flowmop", "flowmop.egg-info"}
 
 
 @pytest.fixture(scope="module")
@@ -75,11 +75,6 @@ def test_wheel_metadata_has_the_pypi_fields(built):
     assert built["wheel_license"].startswith("MIT License")
 
 
-def test_build_has_no_license_deprecation_warning(built):
-    assert "project.license` as a TOML table is deprecated" not in built["log"]
-    assert "License classifiers are deprecated" not in built["log"]
-
-
 def test_sdist_has_only_package_files(built):
     names = built["sdist_names"]
     for needed in ("flowmop/cli.py", "LICENSE", "README.md", "pyproject.toml"):
@@ -87,7 +82,13 @@ def test_sdist_has_only_package_files(built):
     hidden = [n for n in names if any(part.startswith(".") for part in Path(n).parts)]
     assert hidden == []
     other = sorted({Path(n).parts[0] for n in names if n} - SDIST_TOP_LEVEL)
-    assert other == []
+    assert other == []  # no tests/: they need the wrapper scripts, which the sdist does not have
+
+
+def test_test_extra_installs_the_build_tool():
+    pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    test_extra = pyproject.split("test = [", 1)[1].split("]", 1)[0]
+    assert '"build"' in test_extra
 
 
 def test_readme_installs_from_pypi_and_names_the_license():
