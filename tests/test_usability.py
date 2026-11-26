@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 PAPER_DEFAULTS = {
-    "fluor_mode": "positive_geomeans",
+    "fluor_mode": "positives",
     "mad_smoothing": [0.01, 0.05],
     "min_cells": 1000,
     "max_bins": 600,
@@ -666,7 +666,7 @@ def test_shell_wrapper_option_with_no_value_gives_a_clear_error(tmp_path):
     assert "unbound" not in result.stderr
 
 
-@pytest.mark.parametrize("fluor_mode", ["geomean", "both"])
+@pytest.mark.parametrize("fluor_mode", ["peaks", "positives", "geomean", "both"])
 def test_every_fluor_mode_runs(tmp_path, fluor_mode):
     from flowmop.cli import main
 
@@ -678,3 +678,33 @@ def test_every_fluor_mode_runs(tmp_path, fluor_mode):
     row = _read_summary(out)["g.fcs"]
     assert row["status"] == "ok"
     assert 0 < int(row["passed_time"]) <= 20000
+
+
+def test_positive_geomeans_is_an_alias_of_positives_in_the_cli():
+    from flowmop.cli import build_parser
+
+    parser = build_parser()
+    assert parser.parse_args(["x.fcs", "--fluor-mode", "positive_geomeans"]).fluor_mode == "positives"
+    assert parser.parse_args(["x.fcs", "--fluor-mode", "peaks"]).fluor_mode == "peaks"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["x.fcs", "--fluor-mode", "positive"])
+
+
+def test_positive_geomeans_alias_gives_the_same_output_as_positives(tmp_path):
+    import flowio
+    from flowmop.process import process_file
+
+    sample = tmp_path / "a.fcs"
+    _write_synthetic_fcs(sample, seed=42)
+    outputs = {}
+    for mode in ("positives", "positive_geomeans"):
+        out = tmp_path / mode
+        summary = process_file(str(sample), output_dir=str(out), fluor_mode=mode)
+        outputs[mode] = flowio.FlowData(summary["output"])
+
+    np.testing.assert_array_equal(
+        outputs["positives"].as_array(preprocess=False),
+        outputs["positive_geomeans"].as_array(preprocess=False),
+    )
+    for flow_data in outputs.values():
+        assert flow_data.text["flowmop_fluor_mode"] == "positives"

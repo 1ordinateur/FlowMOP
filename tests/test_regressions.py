@@ -1,4 +1,5 @@
 import importlib
+import inspect
 import os
 import subprocess
 import sys
@@ -7,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1063,3 +1065,51 @@ def test_geomean_check_reads_range_bins_like_index_bins():
     np.testing.assert_array_equal(from_ranges["Bin"], from_indices["Bin"])
     np.testing.assert_allclose(from_ranges["Threshold"], from_indices["Threshold"])
     assert np.all(from_ranges["Threshold"] > 0)
+
+
+def test_fluor_mode_names_select_the_mode_code(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    time_gating = importlib.import_module("flowmop.time_gating")
+    expected = {
+        "peaks": {"peaks"},
+        "positives": {"positives"},
+        "positive_geomeans": {"positives"},
+        "geomean": {"geomean"},
+        "both": {"peaks", "geomean"},
+    }
+
+    for mode, wanted in expected.items():
+        gate = time_gating.MADTimeGate(enable_dask=False, fluor_mode=mode)
+        called = set()
+
+        def recorder(name):
+            def fake(*args):
+                called.add(name)
+                return args[-1]
+
+            return fake
+
+        monkeypatch.setattr(gate, "_process_positive_peaks", recorder("peaks"))
+        monkeypatch.setattr(gate, "_process_geometric_mean", recorder("geomean"))
+        monkeypatch.setattr(gate, "_process_positive_geomeans", recorder("positives"))
+        gate.gate(np.ones((4, 3), dtype=float), 0, ["Time", "CD3", "CD19"])
+
+        assert called == wanted, mode
+
+
+def test_unknown_fluor_mode_is_an_error(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    time_gating = importlib.import_module("flowmop.time_gating")
+    gate = time_gating.MADTimeGate(enable_dask=False, fluor_mode="positive")
+
+    with pytest.raises(ValueError, match="fluor_mode"):
+        gate.gate(np.ones((4, 3), dtype=float), 0, ["Time", "CD3", "CD19"])
+
+
+def test_class_defaults_keep_the_peaks_mode(monkeypatch):
+    _install_optional_dependency_stubs(monkeypatch)
+    flowmop_new = importlib.import_module("flowmop.pipeline")
+    time_gating = importlib.import_module("flowmop.time_gating")
+
+    assert inspect.signature(time_gating.MADTimeGate).parameters["fluor_mode"].default == "peaks"
+    assert flowmop_new.FlowMOP(enable_dask=False).time_gate.fluor_mode == "peaks"
