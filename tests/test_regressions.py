@@ -1047,3 +1047,19 @@ def test_batch_script_help_does_not_require_parallel():
 
     assert result.returncode == 0
     assert "Process multiple FCS/parquet files" in result.stdout
+
+
+def test_geomean_check_reads_range_bins_like_index_bins():
+    time_gating = importlib.import_module("flowmop.time_gating")
+    gate = time_gating.MADTimeGate(enable_dask=False, fluor_mode="geomean")
+    rng = np.random.default_rng(0)
+    data = rng.lognormal(5, 1, size=(1000, 4))
+    range_bins = [(0, 400), (200, 600), (400, 800), (600, 1000)]
+    index_bins = [np.arange(start, stop) for start, stop in range_bins]
+
+    from_ranges = gate._geomean_mad_check(data, [1, 2, 3], range_bins)
+    from_indices = gate._geomean_mad_check(data, [1, 2, 3], index_bins)
+
+    np.testing.assert_array_equal(from_ranges["Bin"], from_indices["Bin"])
+    np.testing.assert_allclose(from_ranges["Threshold"], from_indices["Threshold"])
+    assert np.all(from_ranges["Threshold"] > 0)

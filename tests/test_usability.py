@@ -664,3 +664,17 @@ def test_shell_wrapper_option_with_no_value_gives_a_clear_error(tmp_path):
     assert result.returncode == 1
     assert "needs a value" in result.stderr
     assert "unbound" not in result.stderr
+
+
+@pytest.mark.parametrize("fluor_mode", ["geomean", "both"])
+def test_every_fluor_mode_runs(tmp_path, fluor_mode):
+    from flowmop.cli import main
+
+    sample = tmp_path / "g.fcs"
+    _write_synthetic_fcs(sample, seed=41)
+    out = tmp_path / "out"
+
+    assert main([str(sample), "-o", str(out), "--fluor-mode", fluor_mode]) == 0
+    row = _read_summary(out)["g.fcs"]
+    assert row["status"] == "ok"
+    assert 0 < int(row["passed_time"]) <= 20000
