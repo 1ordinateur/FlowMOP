@@ -18,6 +18,7 @@ FlowMOP does not delete events. Each output FCS file keeps all events in their o
 - [Old batch script](#old-batch-script)
 - [Problems and solutions](#problems-and-solutions)
 - [For developers](#for-developers)
+- [License](#license)
 
 ## Install
 
@@ -40,6 +41,12 @@ You need Python 3.9 or later.
    ```
 
 2. Install FlowMOP and its dependencies with one command:
+
+   ```bash
+   pip install flowmop
+   ```
+
+   To get the newest code from GitHub, use this command (you must have git):
 
    ```bash
    pip install git+https://github.com/1ordinateur/FlowMOP.git
@@ -288,3 +295,7 @@ Notes:
 - For FCS files, FlowMOP uses the marker names when they exist, and the channel names when they do not. The scatter channels (FSC/SSC) always use the channel name.
 - By default, FlowMOP runs the gates of one file in parallel. Use `--disable-dask` for debugging, or when you use many `--jobs`.
 - The tests in `tests/test_benchmark_*.py` need the benchmark scripts of the FlowMOP paper repository. In a separate copy of FlowMOP, pytest skips them.
+
+## License
+
+FlowMOP has the MIT License. The full text is in the `LICENSE` file.
