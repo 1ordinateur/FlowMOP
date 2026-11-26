@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-SDIST_TOP_LEVEL = {"LICENSE", "README.md", "PKG-INFO", "pyproject.toml", "setup.cfg", "flowmop", "flowmop.egg-info"}
+SDIST_TOP_LEVEL = {"LICENSE", "MANIFEST.in", "README.md", "PKG-INFO", "pyproject.toml", "setup.cfg", "flowmop", "flowmop.egg-info"}
 
 
 @pytest.fixture(scope="module")
