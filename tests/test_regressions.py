@@ -31,7 +31,7 @@ def _install_optional_dependency_stubs(monkeypatch):
 
 def test_time_channel_at_index_zero_runs_time_gate(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    flowmop_new = importlib.import_module("base.flowmop_new")
+    flowmop_new = importlib.import_module("flowmop.pipeline")
 
     flowmop = flowmop_new.FlowMOP(
         time_channel_index=0,
@@ -60,7 +60,7 @@ def test_time_channel_at_index_zero_runs_time_gate(monkeypatch):
 
 def test_flowmop_context_precomputes_channel_groups(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    flowmop_new = importlib.import_module("base.flowmop_new")
+    flowmop_new = importlib.import_module("flowmop.pipeline")
 
     flowmop = flowmop_new.FlowMOP(time_channel_index=0, enable_dask=False)
     context = flowmop._build_context(
@@ -75,7 +75,7 @@ def test_flowmop_context_precomputes_channel_groups(monkeypatch):
 
 def test_gate_executor_runs_independent_tasks(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    flowmop_new = importlib.import_module("base.flowmop_new")
+    flowmop_new = importlib.import_module("flowmop.pipeline")
 
     executor = flowmop_new.GateExecutor(enabled=True, max_workers=2)
     result = executor.run({"a": lambda: 1, "b": lambda: 2})
@@ -85,7 +85,7 @@ def test_gate_executor_runs_independent_tasks(monkeypatch):
 
 def test_flowmop_disables_gate_executor_when_dask_owns_time_parallelism(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    flowmop_new = importlib.import_module("base.flowmop_new")
+    flowmop_new = importlib.import_module("flowmop.pipeline")
 
     flowmop = flowmop_new.FlowMOP(time_channel_index=0, enable_dask=True)
 
@@ -95,7 +95,7 @@ def test_flowmop_disables_gate_executor_when_dask_owns_time_parallelism(monkeypa
 
 def test_time_preprocessing_preserves_event_count_when_clipping_saturation(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    time_gating = importlib.import_module("functions.time_gating")
+    time_gating = importlib.import_module("flowmop.time_gating")
 
     gate = time_gating.MADTimeGate(enable_dask=False)
     channel = np.array([1.0, 2.0, 3.0, 4.0, 5.0] + [100.0] * 15)
@@ -106,7 +106,7 @@ def test_time_preprocessing_preserves_event_count_when_clipping_saturation(monke
 
 
 def test_spline_smoothing_passthrough_for_tiny_series():
-    flowmop_utils = importlib.import_module("functions.flowmop_utils")
+    flowmop_utils = importlib.import_module("flowmop.utils")
 
     values = np.array([0.25, 0.5, 0.75])
 
@@ -117,7 +117,7 @@ def test_spline_smoothing_passthrough_for_tiny_series():
 
 
 def test_spline_smoothing_zero_factor_disables_smoothing():
-    flowmop_utils = importlib.import_module("functions.flowmop_utils")
+    flowmop_utils = importlib.import_module("flowmop.utils")
 
     values = np.array([0.25, 0.5, 0.75, 0.5, 0.25])
 
@@ -128,7 +128,7 @@ def test_spline_smoothing_zero_factor_disables_smoothing():
 
 
 def test_spline_smoothing_restores_original_scaled_bounds(monkeypatch):
-    flowmop_utils = importlib.import_module("functions.flowmop_utils")
+    flowmop_utils = importlib.import_module("flowmop.utils")
     scipy_interpolate = importlib.import_module("scipy.interpolate")
     captured = []
 
@@ -150,7 +150,7 @@ def test_spline_smoothing_restores_original_scaled_bounds(monkeypatch):
 
 def test_flowmop_restores_historical_default_mad_threshold(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    flowmop_new = importlib.import_module("base.flowmop_new")
+    flowmop_new = importlib.import_module("flowmop.pipeline")
 
     flowmop = flowmop_new.FlowMOP(enable_dask=False)
 
@@ -204,7 +204,7 @@ def _reference_find_peaks(hist: np.ndarray, smoothing_window: int) -> np.ndarray
 
 
 def test_find_peaks_matches_reference_edge_cases():
-    flowmop_utils = importlib.import_module("functions.flowmop_utils")
+    flowmop_utils = importlib.import_module("flowmop.utils")
     cases = [
         np.array([0.0, 1.0, 0.0]),
         np.array([1.0, 1.0, 1.0, 0.0]),
@@ -222,7 +222,7 @@ def test_find_peaks_matches_reference_edge_cases():
 
 
 def test_find_peaks_matches_reference_randomized():
-    flowmop_utils = importlib.import_module("functions.flowmop_utils")
+    flowmop_utils = importlib.import_module("flowmop.utils")
     rng = np.random.default_rng(123)
 
     for _ in range(200):
@@ -237,7 +237,7 @@ def test_find_peaks_matches_reference_randomized():
 
 def test_vectorized_positive_geomeans_match_loop_aggregation(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    time_gating = importlib.import_module("functions.time_gating")
+    time_gating = importlib.import_module("flowmop.time_gating")
 
     gate = time_gating.MADTimeGate(enable_dask=False, min_cells=3)
     data = np.array(
@@ -282,7 +282,7 @@ def test_vectorized_positive_geomeans_match_loop_aggregation(monkeypatch):
 
 def test_range_positive_geomeans_match_loop_aggregation(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    time_gating = importlib.import_module("functions.time_gating")
+    time_gating = importlib.import_module("flowmop.time_gating")
 
     gate = time_gating.MADTimeGate(enable_dask=False, min_cells=3)
     data = np.array(
@@ -324,7 +324,7 @@ def test_range_positive_geomeans_match_loop_aggregation(monkeypatch):
 
 def test_vectorized_positive_geomeans_preserve_empty_bin_behavior(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    time_gating = importlib.import_module("functions.time_gating")
+    time_gating = importlib.import_module("flowmop.time_gating")
 
     gate = time_gating.MADTimeGate(enable_dask=False, min_cells=3)
     data = np.array(
@@ -353,7 +353,7 @@ def test_vectorized_positive_geomeans_preserve_empty_bin_behavior(monkeypatch):
 
 def test_removed_bins_deduplicates_overlapping_windows(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    time_gating = importlib.import_module("functions.time_gating")
+    time_gating = importlib.import_module("flowmop.time_gating")
 
     gate = time_gating.MADTimeGate(enable_dask=False)
     breaks = [
@@ -370,7 +370,7 @@ def test_removed_bins_deduplicates_overlapping_windows(monkeypatch):
 
 def test_channel_summary_mad_helper_accumulates_rejections(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    time_gating = importlib.import_module("functions.time_gating")
+    time_gating = importlib.import_module("flowmop.time_gating")
 
     gate = time_gating.MADTimeGate(enable_dask=False)
     summaries = {
@@ -404,7 +404,7 @@ def test_channel_summary_mad_helper_accumulates_rejections(monkeypatch):
 
 def test_positive_peaks_wrapper_forwards_markers_and_dask(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    time_gating = importlib.import_module("functions.time_gating")
+    time_gating = importlib.import_module("flowmop.time_gating")
 
     gate = time_gating.MADTimeGate(enable_dask=True)
     thresholds = {
@@ -442,7 +442,7 @@ def test_positive_peaks_wrapper_forwards_markers_and_dask(monkeypatch):
 
 def test_geomean_wrapper_forwards_dask(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    time_gating = importlib.import_module("functions.time_gating")
+    time_gating = importlib.import_module("flowmop.time_gating")
 
     gate = time_gating.MADTimeGate(enable_dask=True)
     geomean_values = np.array([(0, 10.0)], dtype=[("Bin", int), ("Threshold", float)])
@@ -476,7 +476,7 @@ def test_geomean_wrapper_forwards_dask(monkeypatch):
 
 def test_threshold_channel_blocks_are_coarse(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    time_gating = importlib.import_module("functions.time_gating")
+    time_gating = importlib.import_module("flowmop.time_gating")
 
     gate = time_gating.MADTimeGate(enable_dask=True)
 
@@ -490,7 +490,7 @@ def test_threshold_channel_blocks_are_coarse(monkeypatch):
 
 def test_dask_channel_work_threshold_skips_one_million_event_files(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    time_gating = importlib.import_module("functions.time_gating")
+    time_gating = importlib.import_module("flowmop.time_gating")
 
     gate = time_gating.MADTimeGate(enable_dask=True)
     data = np.ones((1_000_000, 4), dtype=np.float32)
@@ -501,7 +501,7 @@ def test_dask_channel_work_threshold_skips_one_million_event_files(monkeypatch):
 
 def test_threshold_block_matches_sequential_channel_loop(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    time_gating = importlib.import_module("functions.time_gating")
+    time_gating = importlib.import_module("flowmop.time_gating")
 
     gate = time_gating.MADTimeGate(enable_dask=False)
     data = np.ones((5, 4), dtype=float)
@@ -527,7 +527,7 @@ def test_threshold_block_matches_sequential_channel_loop(monkeypatch):
 
 def test_both_mode_requires_two_rejection_contributions(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    time_gating = importlib.import_module("functions.time_gating")
+    time_gating = importlib.import_module("flowmop.time_gating")
 
     gate = time_gating.MADTimeGate(enable_dask=False, fluor_mode="both")
 
@@ -553,7 +553,7 @@ def test_both_mode_requires_two_rejection_contributions(monkeypatch):
 
 def test_time_gate_vector_only_skips_filtered_data_slice(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    time_gating = importlib.import_module("functions.time_gating")
+    time_gating = importlib.import_module("flowmop.time_gating")
 
     data = np.ones((4, 3), dtype=float)
     gate = time_gating.MADTimeGate(enable_dask=False, fluor_mode="both")
@@ -584,7 +584,7 @@ def test_time_gate_vector_only_skips_filtered_data_slice(monkeypatch):
 
 def test_flowmop_requests_vector_only_time_gate_when_supported(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    flowmop_new = importlib.import_module("base.flowmop_new")
+    flowmop_new = importlib.import_module("flowmop.pipeline")
 
     flowmop = flowmop_new.FlowMOP(
         time_channel_index=0,
@@ -613,7 +613,7 @@ def test_flowmop_requests_vector_only_time_gate_when_supported(monkeypatch):
 
 def test_positive_geomean_path_matches_loop_integration(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    time_gating = importlib.import_module("functions.time_gating")
+    time_gating = importlib.import_module("flowmop.time_gating")
 
     data = np.array(
         [
@@ -692,7 +692,7 @@ def test_positive_geomean_path_matches_loop_integration(monkeypatch):
 
 def test_fsc_only_debris_bottom_bin_check_does_not_require_ssc(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    debris_gating = importlib.import_module("functions.debris_gating")
+    debris_gating = importlib.import_module("flowmop.debris_gating")
 
     gate = debris_gating.FSCDebrisGate(enable_dask=False, enable_ssc=False)
     data = np.array([[1.0, 5.0], [50.0, 6.0], [100.0, 7.0]])
@@ -702,7 +702,7 @@ def test_fsc_only_debris_bottom_bin_check_does_not_require_ssc(monkeypatch):
 
 def test_doublet_histogram_handles_empty_valid_ratios(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    doublet_gating = importlib.import_module("functions.doublet_gating")
+    doublet_gating = importlib.import_module("flowmop.doublet_gating")
 
     gate = doublet_gating.InflectionDoubletGate(enable_dask=False)
     hist, bin_edges, peaks = gate._generate_smooth_histogram(np.array([np.nan, 0.5, 0.9]))
@@ -714,7 +714,7 @@ def test_doublet_histogram_handles_empty_valid_ratios(monkeypatch):
 
 def test_flowmop_mad_smoothing_values_reach_time_gate(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    flowmop_new = importlib.import_module("base.flowmop_new")
+    flowmop_new = importlib.import_module("flowmop.pipeline")
 
     flowmop = flowmop_new.FlowMOP(mad_smoothings=[0.2, 0.8], enable_dask=False)
 
@@ -724,7 +724,7 @@ def test_flowmop_mad_smoothing_values_reach_time_gate(monkeypatch):
 
 def test_flowmop_uses_selected_default_mad_smoothing(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    flowmop_new = importlib.import_module("base.flowmop_new")
+    flowmop_new = importlib.import_module("flowmop.pipeline")
 
     flowmop = flowmop_new.FlowMOP(enable_dask=False)
 
@@ -733,7 +733,7 @@ def test_flowmop_uses_selected_default_mad_smoothing(monkeypatch):
 
 def test_doublet_gate_passes_through_when_ratios_are_invalid(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    doublet_gating = importlib.import_module("functions.doublet_gating")
+    doublet_gating = importlib.import_module("flowmop.doublet_gating")
 
     gate = doublet_gating.InflectionDoubletGate(enable_dask=False)
     data = np.array(
@@ -754,7 +754,7 @@ def test_output_complete_resolves_passed_columns_as_full_names(tmp_path, monkeyp
     monkeypatch.setitem(sys.modules, "readfcs", readfcs)
     monkeypatch.setitem(sys.modules, "fcswrite", fcswrite)
 
-    output_complete = importlib.import_module("base.output_complete_flowmop")
+    output_complete = importlib.import_module("flowmop.output_complete")
     output_complete = importlib.reload(output_complete)
 
     input_dir = tmp_path / "input"
@@ -796,7 +796,7 @@ def test_output_complete_resolves_passed_columns_as_full_names(tmp_path, monkeyp
 def test_filtered_writer_uses_numpy_output_arrays(tmp_path, monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
 
-    flowmop_exec = importlib.import_module("flowmop_exec")
+    flowmop_exec = importlib.import_module("flowmop.process")
     flowmop_exec = importlib.reload(flowmop_exec)
 
     output_data = np.array(
@@ -842,7 +842,7 @@ def test_filtered_writer_uses_numpy_output_arrays(tmp_path, monkeypatch):
 def test_fcs_metadata_preserves_delimiter_and_drops_writer_managed_fields(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
 
-    flowmop_exec = importlib.import_module("flowmop_exec")
+    flowmop_exec = importlib.import_module("flowmop.process")
     flowmop_exec = importlib.reload(flowmop_exec)
 
     metadata = flowmop_exec._clean_metadata(
@@ -863,7 +863,7 @@ def test_fcs_metadata_preserves_delimiter_and_drops_writer_managed_fields(monkey
 
 def test_fcs_metadata_drops_parsed_spill_matrix(monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
-    flowmop_exec = importlib.import_module("flowmop_exec")
+    flowmop_exec = importlib.import_module("flowmop.process")
     flowmop_exec = importlib.reload(flowmop_exec)
 
     metadata = flowmop_exec._clean_metadata(
@@ -880,7 +880,7 @@ def test_fcs_metadata_drops_parsed_spill_matrix(monkeypatch):
 def test_metadata_preserving_writer_round_trips_parameter_definitions(tmp_path):
     import readfcs
 
-    flowmop_exec = importlib.import_module("flowmop_exec")
+    flowmop_exec = importlib.import_module("flowmop.process")
     flowmop_exec = importlib.reload(flowmop_exec)
     output_path = tmp_path / "roundtrip.fcs"
     metadata = {
@@ -916,7 +916,7 @@ def test_metadata_preserving_writer_round_trips_parameter_definitions(tmp_path):
 def test_process_file_writes_single_annotated_fcs_with_passed_columns(tmp_path, monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
 
-    flowmop_exec = importlib.import_module("flowmop_exec")
+    flowmop_exec = importlib.import_module("flowmop.process")
     flowmop_exec = importlib.reload(flowmop_exec)
     flowmop_exec.np = np
 
@@ -949,7 +949,7 @@ def test_process_file_writes_single_annotated_fcs_with_passed_columns(tmp_path, 
 
     monkeypatch.setattr(flowmop_exec, "load_data", lambda _path: ({}, data.copy(), list(data.columns)))
     monkeypatch.setattr(flowmop_exec, "_load_flowmop", lambda: None)
-    monkeypatch.setattr(flowmop_exec, "flowmop_new", types.SimpleNamespace(FlowMOP=FakeFlowMOP))
+    monkeypatch.setattr(flowmop_exec, "pipeline", types.SimpleNamespace(FlowMOP=FakeFlowMOP))
     monkeypatch.setattr(flowmop_exec, "_write_fcs_preserving_parameters", fake_write_fcs)
 
     flowmop_exec.process_file("sample.fcs", output_dir=str(tmp_path))
@@ -976,7 +976,7 @@ def test_process_file_writes_single_annotated_fcs_with_passed_columns(tmp_path, 
 def test_process_file_no_output_does_not_import_fcs_writer(tmp_path, monkeypatch):
     _install_optional_dependency_stubs(monkeypatch)
 
-    flowmop_exec = importlib.import_module("flowmop_exec")
+    flowmop_exec = importlib.import_module("flowmop.process")
     flowmop_exec = importlib.reload(flowmop_exec)
 
     data = pd.DataFrame(
@@ -1011,7 +1011,7 @@ def test_process_file_no_output_does_not_import_fcs_writer(tmp_path, monkeypatch
 
     monkeypatch.setattr(flowmop_exec, "load_data", lambda _path: ({}, data.copy(), list(data.columns)))
     monkeypatch.setattr(flowmop_exec, "_import_dependencies", fake_import_dependencies)
-    monkeypatch.setattr(flowmop_exec, "flowmop_new", types.SimpleNamespace(FlowMOP=FakeFlowMOP))
+    monkeypatch.setattr(flowmop_exec, "pipeline", types.SimpleNamespace(FlowMOP=FakeFlowMOP))
 
     flowmop_exec.process_file(
         "sample.fcs",

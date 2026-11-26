@@ -4,9 +4,13 @@ import types
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+PAPER_SCRIPT = REPO_ROOT.parent / "benchmarks" / "benchmark_qc_algorithms.py"
+if not PAPER_SCRIPT.exists():
+    pytest.skip("the paper benchmark scripts exist only in FlowMOP_paper", allow_module_level=True)
 sys.path.insert(0, str(REPO_ROOT))
 benchmark = importlib.import_module("benchmarks.benchmark_qc_algorithms")
 
