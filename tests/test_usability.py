@@ -7,6 +7,7 @@ import io
 import os
 import shutil
 import subprocess
+import time
 import sys
 from pathlib import Path
 
@@ -343,3 +344,323 @@ def test_shell_wrapper_runs_without_gnu_parallel(tmp_path):
     second = _run(command, cwd=tmp_path, env=env)
     assert second.returncode == 0, second.stdout + second.stderr
     assert "skipped" in second.stdout
+
+
+# ---------------------------------------------------------------------------
+# Round 2: defects from the independent review.
+
+
+def _child_pids(pid: int) -> list:
+    children = []
+    for stat in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = stat.read_text().rsplit(")", 1)[1].split()
+        except OSError:
+            continue
+        if int(fields[1]) == pid:
+            children.append(int(stat.parent.name))
+    return children
+
+
+def _is_worker(pid: int) -> bool:
+    try:
+        cmdline = (Path("/proc") / str(pid) / "cmdline").read_bytes().replace(b"\0", b" ")
+    except OSError:
+        return False
+    return b"spawn_main" in cmdline and b"resource_tracker" not in cmdline
+
+
+def _start_cli(args, cwd):
+    env = dict(os.environ, PYTHONPATH=str(REPO_ROOT))
+    return subprocess.Popen(
+        [sys.executable, "-u", "-m", "flowmop", *args],
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+
+
+@pytest.fixture(scope="module")
+def many_inputs(tmp_path_factory):
+    inputs = tmp_path_factory.mktemp("many") / "inputs"
+    inputs.mkdir()
+    for index in range(10):
+        _write_synthetic_fcs(inputs / f"m{index:02d}.fcs", n_events=60000, seed=20 + index)
+    return inputs
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir() or os.name != "posix", reason="needs POSIX signals and /proc")
+def test_ctrl_c_stops_a_parallel_run_and_keeps_the_summary(many_inputs, tmp_path):
+    import signal
+
+    out = tmp_path / "out"
+    process = _start_cli([str(many_inputs), "-o", str(out), "--jobs", "2"], cwd=tmp_path)
+    first = process.stdout.readline()
+    while first and not first.startswith("["):
+        first = process.stdout.readline()
+    os.killpg(process.pid, signal.SIGINT)
+    started = time.monotonic()
+    stdout, stderr = process.communicate(timeout=60)
+    stopped_after = time.monotonic() - started
+
+    assert process.returncode == 130, stdout + stderr
+    assert stopped_after < 10
+    assert "Traceback" not in stderr + stdout
+    summary = _read_summary(out)
+    finished = [row for row in summary.values() if row["status"] == "ok"]
+    assert 1 <= len(finished) < 10
+    outputs = list(out.glob("flowmop_*"))
+    assert {path.name for path in outputs} == {f"flowmop_{Path(row['file']).stem}.fcs" for row in finished} | {"flowmop_summary.csv"}
+    for row in finished:
+        assert _read_passed_final(out / f"flowmop_{Path(row['file']).stem}.fcs") == int(row["passed_final"])
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir() or os.name != "posix", reason="needs POSIX signals and /proc")
+def test_a_killed_worker_fails_only_its_own_file(many_inputs, tmp_path):
+    import signal
+
+    out = tmp_path / "out"
+    process = _start_cli([str(many_inputs), "-o", str(out), "--jobs", "2"], cwd=tmp_path)
+    workers = []
+    deadline = time.monotonic() + 30
+    while not workers and time.monotonic() < deadline:
+        time.sleep(0.2)
+        workers = [pid for pid in _child_pids(process.pid) if _is_worker(pid)]
+    assert workers, "no worker process found"
+    time.sleep(1.0)
+    os.kill(workers[0], signal.SIGKILL)
+    stdout, stderr = process.communicate(timeout=300)
+
+    summary = _read_summary(out)
+    failed = [row for row in summary.values() if row["status"] == "failed"]
+    assert process.returncode == 1, stdout + stderr
+    assert len(failed) == 1, stdout
+    assert sum(row["status"] == "ok" for row in summary.values()) == 9
+    assert "stopped" in failed[0]["error"]
+
+
+def test_summary_keeps_rows_of_earlier_runs(tmp_path):
+    from flowmop.cli import main
+
+    first, second = tmp_path / "r1.fcs", tmp_path / "r2.fcs"
+    _write_synthetic_fcs(first, seed=30)
+    _write_synthetic_fcs(second, seed=31)
+    out = tmp_path / "out"
+
+    assert main([str(first), "-o", str(out)]) == 0
+    assert main([str(second), "-o", str(out)]) == 0
+    assert main([str(first), "-o", str(out), "--skip-existing"]) == 0
+
+    summary = _read_summary(out)
+    assert set(summary) == {"r1.fcs", "r2.fcs"}
+    assert summary["r2.fcs"]["status"] == "ok"
+    assert summary["r1.fcs"]["status"] == "skipped"
+    assert int(summary["r1.fcs"]["events"]) == 20000
+    assert int(summary["r1.fcs"]["passed_final"]) == _read_passed_final(out / "flowmop_r1.fcs")
+
+
+def test_output_folder_can_be_the_input_folder(tmp_path):
+    from flowmop.cli import main
+
+    folder = tmp_path / "data"
+    folder.mkdir()
+    _write_synthetic_fcs(folder / "same.fcs", seed=32)
+
+    assert main([str(folder), "-o", str(folder)]) == 0
+    assert (folder / "flowmop_same.fcs").is_file()
+    assert main([str(folder), "-o", str(folder), "--skip-existing"]) == 0
+    assert set(_read_summary(folder)) == {"same.fcs"}
+
+
+def test_filtered_output_inside_the_input_folder_is_not_an_input(tmp_path):
+    from flowmop.cli import main
+
+    folder = tmp_path / "data"
+    folder.mkdir()
+    _write_synthetic_fcs(folder / "f1.fcs", seed=33)
+    args = [str(folder), "-o", str(tmp_path / "out"), "--export-filtered-fcs", "--filtered-output-dir", str(folder / "filtered")]
+
+    assert main(args) == 0
+    assert list((folder / "filtered").rglob("*.fcs"))
+    assert main(args) == 0
+
+
+def test_same_name_with_other_letter_case_is_rejected(tmp_path, capsys):
+    from flowmop.cli import main
+
+    for folder, name in (("x", "S1.fcs"), ("y", "s1.fcs")):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / name).write_bytes(b"")
+
+    assert main([str(tmp_path / "x"), str(tmp_path / "y"), "-o", str(tmp_path / "out"), "--dry-run"]) == 2
+    assert "same output name" in capsys.readouterr().err
+
+
+def test_explicit_file_inside_the_output_folder_is_rejected(tmp_path, capsys):
+    from flowmop.cli import main
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "flowmop_x.fcs").write_bytes(b"")
+
+    assert main([str(out / "flowmop_x.fcs"), "-o", str(out), "--dry-run"]) == 2
+    assert "output" in capsys.readouterr().err
+
+
+def test_explicit_file_must_be_fcs_or_parquet_with_a_pattern(tmp_path, capsys):
+    from flowmop.cli import main
+
+    notes = tmp_path / "notes.txt"
+    notes.write_text("x")
+
+    assert main([str(notes), "--file-pattern", "*.fcs", "-o", str(tmp_path / "out"), "--dry-run"]) == 2
+    assert "notes.txt" in capsys.readouterr().err
+
+
+def test_output_path_that_is_a_file_gives_one_error_line(tmp_path, capsys):
+    from flowmop.cli import main
+
+    sample = tmp_path / "s.fcs"
+    sample.write_bytes(b"")
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")
+
+    assert main([str(sample), "-o", str(blocker)]) == 2
+    err = capsys.readouterr().err
+    assert len([line for line in err.splitlines() if line.strip()]) == 1, err
+    assert "Traceback" not in err
+
+
+def test_missing_file_error_is_one_line(tmp_path, capsys):
+    from flowmop.cli import main
+
+    assert main([str(tmp_path / "none.fcs"), "-o", str(tmp_path / "out")]) == 2
+    err = capsys.readouterr().err
+    assert len([line for line in err.splitlines() if line.strip()]) == 1, err
+
+
+def test_same_file_in_other_forms_is_listed_once(tmp_path, capsys, monkeypatch):
+    from flowmop.cli import main
+
+    (tmp_path / "one.fcs").write_bytes(b"")
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["one.fcs", "./one.fcs", str(tmp_path / "one.fcs"), str(tmp_path), "-o", "out", "--dry-run"]) == 0
+    listed = capsys.readouterr().out
+    assert listed.count("one.fcs") == 1, listed
+
+
+def test_input_folder_skips_files_in_its_output_subfolder(tmp_path, capsys):
+    from flowmop.cli import main
+
+    folder = tmp_path / "data"
+    (folder / "out" / "logs").mkdir(parents=True)
+    (folder / "a.fcs").write_bytes(b"")
+    (folder / "out" / "flowmop_a.fcs").write_bytes(b"")
+    (folder / "out" / "copy.fcs").write_bytes(b"")
+
+    assert main([str(folder), "-o", str(folder / "out"), "--dry-run"]) == 0
+    listed = capsys.readouterr().out
+    assert "a.fcs" in listed
+    assert "flowmop_a.fcs" not in listed
+    assert "copy.fcs" not in listed
+
+
+def test_counters_count_all_inputs_after_skips(tmp_path, capsys):
+    from flowmop.cli import main
+
+    first, second = tmp_path / "c1.fcs", tmp_path / "c2.fcs"
+    _write_synthetic_fcs(first, seed=34)
+    _write_synthetic_fcs(second, seed=35)
+    out = tmp_path / "out"
+    assert main([str(first), "-o", str(out)]) == 0
+    capsys.readouterr()
+
+    assert main([str(first), str(second), "-o", str(out), "--skip-existing"]) == 0
+    screen = capsys.readouterr().out
+    assert "[1/2] c1.fcs  skipped" in screen
+    assert "[2/2] c2.fcs" in screen
+
+
+def test_batch_summary_has_all_gate_counts_in_input_order(batch_run):
+    import flowio
+
+    out = batch_run["out"]
+    summary = _read_summary(out)
+
+    assert list(summary) == ["bad.fcs", "s 1.fcs", "s2.fcs"]
+    for name in ("s 1.fcs", "s2.fcs"):
+        flow_data = flowio.FlowData(str(out / f"flowmop_{Path(name).stem}.fcs"))
+        events = flow_data.as_array(preprocess=False)
+        for column in ("passed_lod", "passed_debris", "passed_time", "passed_doublet", "passed_final"):
+            assert int(summary[name][column]) == int(events[:, flow_data.pnn_labels.index(column)].sum()), column
+
+
+def test_verbose_shows_the_detail_on_the_screen(tmp_path):
+    sample = tmp_path / "v.fcs"
+    _write_synthetic_fcs(sample, seed=36)
+    env = dict(os.environ, PYTHONPATH=str(REPO_ROOT))
+
+    result = _run([sys.executable, "-m", "flowmop", str(sample), "-o", str(tmp_path / "out"), "--verbose"], cwd=tmp_path, env=env)
+
+    assert result.returncode == 0, result.stderr
+    assert "Events passing all filters" in result.stdout
+
+
+def test_plots_dir_option_is_used(tmp_path):
+    from flowmop.cli import main
+
+    sample = tmp_path / "p.fcs"
+    _write_synthetic_fcs(sample, seed=37)
+    plots = tmp_path / "my_plots"
+
+    assert main([str(sample), "-o", str(tmp_path / "out"), "--enable-plots", "--plots-dir", str(plots), "--skip-debris", "--skip-doublets"]) == 0
+    assert list((plots / "p").glob("*.png"))
+    assert not (tmp_path / "out" / "plots").exists()
+
+
+def test_flowmop_exec_runs_parallel_jobs_from_any_folder(tmp_path):
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    _write_synthetic_fcs(inputs / "e1.fcs", seed=38)
+    _write_synthetic_fcs(inputs / "e2.fcs", seed=39)
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+
+    result = _run([sys.executable, str(REPO_ROOT / "flowmop_exec.py"), str(inputs), "-o", str(tmp_path / "out"), "-j", "2"], cwd=tmp_path, env=env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert {path.name for path in (tmp_path / "out").glob("flowmop_*.fcs")} == {"flowmop_e1.fcs", "flowmop_e2.fcs"}
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not available")
+def test_shell_wrapper_splits_mad_smoothing_and_keeps_parquet(tmp_path):
+    import flowio
+    import pandas as pd
+
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    _write_synthetic_fcs(inputs / "w.fcs", seed=40)
+    pd.DataFrame({"FSC-A": [1.0, 2.0]}).to_parquet(inputs / "w2.parquet")
+    out = tmp_path / "out"
+    env = dict(os.environ, PYTHON=sys.executable)
+    script = str(REPO_ROOT / "run_flowmop_directory.sh")
+
+    listed = _run(["bash", script, "--input-dir", str(inputs), "--output-dir", str(out), "--file-pattern", "*.fcs", "--dry-run"], cwd=tmp_path, env=env)
+    assert listed.returncode == 0, listed.stdout + listed.stderr
+    assert "w2.parquet" in listed.stdout
+
+    run = _run(["bash", script, "--input-dir", str(inputs / "w.fcs"), "--output-dir", str(out), "--mad-smoothing", "0.02 0.1"], cwd=tmp_path, env=env)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert flowio.FlowData(str(out / "flowmop_w.fcs")).text["flowmop_mad_smoothing"] == "[0.02, 0.1]"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not available")
+def test_shell_wrapper_option_with_no_value_gives_a_clear_error(tmp_path):
+    result = _run(["bash", str(REPO_ROOT / "run_flowmop_directory.sh"), "--input-dir"], cwd=tmp_path)
+
+    assert result.returncode == 1
+    assert "needs a value" in result.stderr
+    assert "unbound" not in result.stderr
